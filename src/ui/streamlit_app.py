@@ -1,3 +1,4 @@
+import json
 from datetime import date, timedelta
 
 try:
@@ -93,6 +94,12 @@ def sync_states_dataframe():
     return rows
 
 
+def first_code(value):
+    if not value:
+        return ""
+    return str(value).replace(" ", "").split(",")[0].strip().upper()
+
+
 def render_manual_update_panel():
     st.header("データ更新")
     codes = st.text_input("銘柄コード", value="7203")
@@ -119,9 +126,40 @@ def render_manual_update_panel():
             except Exception as exc:
                 st.error(str(exc))
 
+    if st.button("EDINET DB補完更新"):
+        with st.spinner("EDINET DBから有報・年度財務を取得しています..."):
+            try:
+                result = sync_market(
+                    market="jp",
+                    source="edinetdb",
+                    mode="manual",
+                    codes=codes,
+                    include_prices=False,
+                    include_financials=True,
+                    include_dividends=False,
+                    include_events=True,
+                )
+                st.success(result.get("message", "EDINET DB補完更新が完了しました。"))
+                if result.get("warnings"):
+                    st.warning(" / ".join(result["warnings"]))
+                st.json(result)
+            except Exception as exc:
+                st.error(str(exc))
+
     if st.button("サンプルデータ更新"):
         result = sync_market(market="jp", source="sample", mode="manual")
         st.success(result.get("message", "サンプルデータを更新しました。"))
+    return first_code(codes)
+
+
+def parse_risk_flags(value):
+    if not value:
+        return ""
+    try:
+        flags = json.loads(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return ", ".join(flags)
 
 
 def render_detail(ticker, preset):
@@ -181,6 +219,36 @@ def render_detail(ticker, preset):
     else:
         st.write("直近カタリストはありません。")
 
+    st.markdown("#### EDINET DB 有報・開示")
+    filings = metrics.get("filings", [])
+    if filings:
+        st.table(
+            [
+                {
+                    "提出日": filing["filing_date"],
+                    "種別": filing["document_type"],
+                    "タイトル": filing["title"],
+                    "ソース": filing["source"],
+                }
+                for filing in filings
+            ]
+        )
+    else:
+        st.write("EDINET DB由来の開示一覧はまだありません。")
+
+    st.markdown("#### 有報テキストリスク語")
+    text_blocks = metrics.get("text_blocks", [])
+    risky_blocks = [block for block in text_blocks if parse_risk_flags(block.get("risk_flags_json"))]
+    if risky_blocks:
+        for block in risky_blocks:
+            flags = parse_risk_flags(block.get("risk_flags_json"))
+            st.warning("%s / %s / %s" % (block.get("fiscal_year") or "-", block.get("title") or "-", flags))
+            st.write(block.get("text_excerpt") or "")
+    elif text_blocks:
+        st.write("取得済みの有報テキストから主要なリスク語は検出されていません。")
+    else:
+        st.write("EDINET DB由来の有報テキストはまだありません。")
+
 
 def main():
     ensure_data()
@@ -201,7 +269,7 @@ def main():
             value=float(presets[preset].get("filters", {}).get("min_equity_ratio", 30)),
         )
         run = st.button("スクリーニング実行", type="primary")
-        render_manual_update_panel()
+        detail_hint = render_manual_update_panel()
 
     with st.expander("更新状態", expanded=False):
         states = sync_states_dataframe()
@@ -229,7 +297,8 @@ def main():
         csv_path = export_results(results, preset, "csv")
         st.download_button("CSV出力", csv_path.read_bytes(), file_name=csv_path.name, mime="text/csv")
         ticker_options = [item["ticker"] for item in results]
-        selected = st.selectbox("詳細分析", ticker_options)
+        selected_index = ticker_options.index(detail_hint) if detail_hint in ticker_options else 0
+        selected = st.selectbox("詳細分析", ticker_options, index=selected_index)
         render_detail(selected, preset)
     else:
         st.warning("条件に一致する候補がありません。")

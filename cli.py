@@ -233,7 +233,7 @@ def build_parser():
     sync.add_argument("--market", default="jp", choices=["jp", "us", "all"])
     sync.add_argument("--from", dest="start_date")
     sync.add_argument("--to", dest="end_date")
-    sync.add_argument("--source", default="auto", choices=["auto", "sample", "jquants"])
+    sync.add_argument("--source", default="auto", choices=["auto", "sample", "jquants", "edinetdb"])
     sync.add_argument("--mode", default="manual", choices=["manual", "daily", "backfill"], help="Label the sync run for state tracking.")
     sync.add_argument("--codes", help="Comma-separated issue codes, for example: 7203,9432")
     sync.add_argument("--limit", type=int, help="Limit the starter universe for price/financial sync.")

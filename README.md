@@ -28,6 +28,7 @@ python cli.py app
 python cli.py sync --market jp
 python cli.py sync --market jp --source jquants --codes 7203,9432 --from 2025-01-01
 python cli.py sync --market jp --source jquants --mode manual --codes 7203 --from 2025-01-01
+python cli.py sync --market jp --source edinetdb --mode manual --codes 7203
 python cli.py sync --market jp --source jquants --mode backfill --limit 100 --from 2024-01-01
 python cli.py sync --market jp --source sample
 python cli.py screen --preset balanced
@@ -50,6 +51,7 @@ python cli.py watchlist show
 - J-Quants財務サマリー同期
 - J-Quants配当データ同期
 - J-Quants決算予定イベント同期
+- EDINET DB年度財務・有報開示一覧・有報テキストリスク語同期
 - 手動更新履歴と最終同期状態の保存
 - プリセット読み込み
 - スコアリング
@@ -76,7 +78,7 @@ value-catalyst-screener/
 
 1. MVP 1: サンプルデータ + SQLite + Streamlit + プリセットスクリーニング
 2. MVP 2: J-Quants認証、銘柄一覧、株価、財務、配当、決算予定
-3. MVP 3: EDINET書類一覧、XBRL CSV ZIP、有報テキスト検索
+3. MVP 3: EDINET DBによる年度財務、有報開示一覧、有報テキスト検索
 4. MVP 4: TDnetカタリスト分析
 5. MVP 5: SEC EDGARと米国株価API
 
@@ -92,5 +94,12 @@ value-catalyst-screener/
 
 - 日次更新: `python cli.py sync --market jp --source jquants --mode daily --codes 7203,9432`
 - 追加取得: `python cli.py sync --market jp --source jquants --mode backfill --limit 100 --from 2024-01-01`
+- 有報補完: `python cli.py sync --market jp --source edinetdb --mode manual --codes 7203`
 - 画面更新: Streamlit左サイドバーの `J-Quants手動更新`
+
+## EDINET DB補完
+
+EDINET DBを使う場合は `EDINETDB_API_KEY` を環境変数に設定してください。既存のCodex MCP用に `EDINETDB_AUTH=Bearer ...` を設定している場合も利用できます。
+
+EDINET DB同期では、J-Quantsでは補いづらい年度有報ベースの財務、開示一覧、有報テキストブロックを取得します。有報テキストに `継続企業`、`債務超過`、`上場廃止` などの語が含まれる場合は、リスクイベントとして保存します。
 

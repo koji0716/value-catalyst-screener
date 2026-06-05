@@ -1,4 +1,5 @@
 from src.db.session import get_connection
+from src.ingestion.edinetdb_sync import sync_edinetdb_market
 from src.ingestion.jquants_sync import (
     clear_sample_events_and_filings,
     default_price_start,
@@ -117,11 +118,20 @@ def _sync_market_impl(
             "message": "現時点では日本株同期を優先実装しています。",
         }
 
-    if source not in ("auto", "sample", "jquants"):
+    if source not in ("auto", "sample", "jquants", "edinetdb"):
         raise ValueError("Unknown sync source: %s" % source)
 
     if source == "sample":
         return sync_sample_market(market, start_date, end_date, reset_sample=reset_sample)
+    if source == "edinetdb":
+        return sync_edinetdb_source(
+            market=market,
+            codes=codes,
+            limit=limit,
+            include_financials=include_financials,
+            include_disclosures=True,
+            include_text=include_events,
+        )
 
     client = JQuantsClient()
     if not client.is_configured():
@@ -165,6 +175,35 @@ def sync_sample_market(market, start_date=None, end_date=None, reset_sample=Fals
             "inserted_events": 0,
             "message": "サンプル日本株データを同期しました。",
         }
+    finally:
+        conn.close()
+
+
+def sync_edinetdb_source(
+    market="jp",
+    codes=None,
+    limit=None,
+    include_financials=True,
+    include_disclosures=True,
+    include_text=True,
+):
+    conn = get_connection()
+    try:
+        result = sync_edinetdb_market(
+            conn,
+            codes=codes,
+            limit=limit,
+            include_financials=include_financials,
+            include_disclosures=include_disclosures,
+            include_text=include_text,
+        )
+        result.update(
+            {
+                "market": market,
+                "message": "EDINET DBから有報・財務データを同期しました。",
+            }
+        )
+        return result
     finally:
         conn.close()
 

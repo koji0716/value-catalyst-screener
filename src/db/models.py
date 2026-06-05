@@ -38,6 +38,20 @@ SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS filing_text_blocks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_id INTEGER NOT NULL,
+      source TEXT NOT NULL,
+      fiscal_year INTEGER,
+      section TEXT,
+      title TEXT,
+      text_excerpt TEXT,
+      risk_flags_json TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(company_id) REFERENCES company_master(id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS financial_facts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       company_id INTEGER NOT NULL,
@@ -192,6 +206,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_company_market_ticker ON company_master(market, ticker)",
     "CREATE INDEX IF NOT EXISTS idx_company_market_security_code ON company_master(market, security_code)",
     "CREATE INDEX IF NOT EXISTS idx_financial_company_period ON financial_facts(company_id, period_end)",
+    "CREATE INDEX IF NOT EXISTS idx_text_blocks_company_year ON filing_text_blocks(company_id, fiscal_year)",
     "CREATE INDEX IF NOT EXISTS idx_prices_company_date ON prices(company_id, trade_date)",
     "CREATE INDEX IF NOT EXISTS idx_events_company_date ON events(company_id, event_date)",
     "CREATE INDEX IF NOT EXISTS idx_screening_run ON screening_results(run_id)",

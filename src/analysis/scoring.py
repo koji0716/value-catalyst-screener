@@ -132,6 +132,34 @@ def recent_events(conn, company_id, lookback_days=180):
     return [dict(row) for row in rows]
 
 
+def recent_filings(conn, company_id, limit=8):
+    rows = conn.execute(
+        """
+        SELECT filing_date, document_type, title, url, source
+        FROM filings
+        WHERE company_id = ?
+        ORDER BY filing_date DESC, id DESC
+        LIMIT ?
+        """,
+        (company_id, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def recent_text_blocks(conn, company_id, limit=5):
+    rows = conn.execute(
+        """
+        SELECT fiscal_year, section, title, text_excerpt, risk_flags_json, source
+        FROM filing_text_blocks
+        WHERE company_id = ?
+        ORDER BY fiscal_year DESC, id DESC
+        LIMIT ?
+        """,
+        (company_id, limit),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def build_metrics(conn, company):
     company_id = company["id"]
     fin = latest_financial(conn, company_id)
@@ -159,6 +187,8 @@ def build_metrics(conn, company):
     net_debt_ebitda = safe_div(net_debt, fin["ebitda"])
     revenue_growth = percentage(safe_div(fin["revenue"], prev["revenue"]) - 1) if prev and prev["revenue"] else None
     events = recent_events(conn, company_id)
+    filings = recent_filings(conn, company_id)
+    text_blocks = recent_text_blocks(conn, company_id)
 
     risk_flags = {
         "negative_equity": (fin["total_equity"] or 0) <= 0,
@@ -212,6 +242,8 @@ def build_metrics(conn, company):
         "above_200ma": stats.get("above_200ma"),
         "volume_change": stats.get("volume_change"),
         "events": events,
+        "filings": filings,
+        "text_blocks": text_blocks,
         "catalyst_count": len(events),
         "risk_flags": risk_flags,
     }
@@ -465,6 +497,8 @@ def build_explanation(metrics):
     risk_notes = [name for name, active in metrics.get("risk_flags", {}).items() if active]
     if risk_notes:
         lines.append("注意点: %s。" % ", ".join(risk_notes))
+    edinet_blocks = [block for block in metrics.get("text_blocks", []) if block.get("risk_flags_json") not in (None, "", "[]")]
+    if edinet_blocks:
+        lines.append("EDINET DBの有報テキストにリスク語が検出されています。詳細画面で該当テキストを確認してください。")
     lines.append(DISCLAIMER)
     return "\n".join(lines)
-
