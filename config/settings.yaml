@@ -7,4 +7,12 @@ app:
 providers:
   price_provider: "yfinance"
   edgar_rate_limit_per_sec: 10
-
+  jquants_starter_codes:
+    - "7203"
+    - "9432"
+    - "8058"
+    - "6758"
+    - "7974"
+    - "7267"
+    - "6902"
+    - "1605"

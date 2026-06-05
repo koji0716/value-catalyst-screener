@@ -152,6 +152,40 @@ SCHEMA = [
       FOREIGN KEY(company_id) REFERENCES company_master(id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS sync_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_type TEXT NOT NULL,
+      market TEXT,
+      source TEXT,
+      mode TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      params_json TEXT,
+      result_json TEXT,
+      message TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      started_at DATETIME,
+      finished_at DATETIME
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sync_state (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      state_key TEXT UNIQUE NOT NULL,
+      market TEXT,
+      source TEXT,
+      mode TEXT,
+      status TEXT,
+      last_success_at DATETIME,
+      last_attempt_at DATETIME,
+      last_from_date DATE,
+      last_to_date DATE,
+      target_codes_json TEXT,
+      result_json TEXT,
+      message TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
 ]
 
 INDEXES = [
@@ -161,5 +195,6 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_prices_company_date ON prices(company_id, trade_date)",
     "CREATE INDEX IF NOT EXISTS idx_events_company_date ON events(company_id, event_date)",
     "CREATE INDEX IF NOT EXISTS idx_screening_run ON screening_results(run_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sync_jobs_created ON sync_jobs(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_sync_state_source ON sync_state(source, market)",
 ]
-

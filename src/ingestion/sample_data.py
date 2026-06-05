@@ -243,15 +243,42 @@ def seed_sample_data(conn, reset=False):
     if reset:
         clear_sample_tables(conn)
 
+    inserted = 0
     for item in SAMPLE_COMPANIES:
+        existing = find_existing_company(conn, item)
+        if existing and company_has_non_sample_data(conn, existing["id"]):
+            continue
         company_id = upsert_company(conn, item)
-        delete_company_children(conn, company_id)
+        delete_company_sample_children(conn, company_id)
         insert_financials(conn, company_id, item)
         insert_price_history(conn, company_id, item)
         insert_events(conn, company_id, item)
         insert_filings(conn, company_id, item)
+        inserted += 1
     conn.commit()
-    return len(SAMPLE_COMPANIES)
+    return inserted
+
+
+def find_existing_company(conn, item):
+    return conn.execute(
+        """
+        SELECT id FROM company_master
+        WHERE market = ? AND (ticker = ? OR security_code = ?)
+        LIMIT 1
+        """,
+        (item["market"], item["ticker"], item["security_code"]),
+    ).fetchone()
+
+
+def company_has_non_sample_data(conn, company_id):
+    for table in ["events", "corporate_actions", "prices", "financial_facts", "filings"]:
+        row = conn.execute(
+            "SELECT 1 FROM %s WHERE company_id = ? AND COALESCE(source, '') <> 'sample' LIMIT 1" % table,
+            (company_id,),
+        ).fetchone()
+        if row:
+            return True
+    return False
 
 
 def clear_sample_tables(conn):
@@ -329,6 +356,11 @@ def upsert_company(conn, item):
 def delete_company_children(conn, company_id):
     for table in ["events", "corporate_actions", "prices", "financial_facts", "filings"]:
         conn.execute("DELETE FROM %s WHERE company_id = ?" % table, (company_id,))
+
+
+def delete_company_sample_children(conn, company_id):
+    for table in ["events", "corporate_actions", "prices", "financial_facts", "filings"]:
+        conn.execute("DELETE FROM %s WHERE company_id = ? AND source = 'sample'" % table, (company_id,))
 
 
 def insert_financials(conn, company_id, item):

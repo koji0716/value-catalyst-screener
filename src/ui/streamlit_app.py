@@ -1,3 +1,5 @@
+from datetime import date, timedelta
+
 try:
     import streamlit as st
 except Exception:
@@ -18,6 +20,7 @@ from src.analysis.scoring import explain_ticker, screen_companies
 from src.db.migrations import init_db
 from src.db.session import get_connection
 from src.ingestion.sync_all import sync_market
+from src.ingestion.sync_state import latest_sync_states
 from src.nlp.report_generator import export_results
 from src.ui.components import disclaimer, format_jpy, format_pct, format_ratio
 from src.utils.file_utils import load_presets
@@ -64,6 +67,61 @@ def dataframe(results):
     if pd:
         return pd.DataFrame(rows)
     return rows
+
+
+def sync_states_dataframe():
+    conn = get_connection()
+    try:
+        states = latest_sync_states(conn, limit=8)
+    finally:
+        conn.close()
+    rows = []
+    for state in states:
+        rows.append(
+            {
+                "市場": state.get("market"),
+                "ソース": state.get("source"),
+                "モード": state.get("mode"),
+                "状態": state.get("status"),
+                "最終成功": state.get("last_success_at"),
+                "最終試行": state.get("last_attempt_at"),
+                "メッセージ": state.get("message"),
+            }
+        )
+    if pd:
+        return pd.DataFrame(rows)
+    return rows
+
+
+def render_manual_update_panel():
+    st.header("データ更新")
+    codes = st.text_input("銘柄コード", value="7203")
+    start = st.date_input("株価取得開始日", value=date.today() - timedelta(days=420))
+    update_jquants = st.button("J-Quants手動更新", type="secondary")
+    if update_jquants:
+        with st.spinner("J-Quantsから取得しています..."):
+            try:
+                result = sync_market(
+                    market="jp",
+                    source="jquants",
+                    mode="manual",
+                    codes=codes,
+                    start_date=start.isoformat(),
+                    include_prices=True,
+                    include_financials=True,
+                    include_dividends=True,
+                    include_events=True,
+                )
+                st.success(result.get("message", "更新しました。"))
+                if result.get("warnings"):
+                    st.warning(" / ".join(result["warnings"]))
+                st.json(result)
+            except Exception as exc:
+                st.error(str(exc))
+
+    if st.button("サンプルデータ更新"):
+        result = sync_market(market="jp", source="sample", mode="manual")
+        st.success(result.get("message", "サンプルデータを更新しました。"))
 
 
 def render_detail(ticker, preset):
@@ -143,9 +201,14 @@ def main():
             value=float(presets[preset].get("filters", {}).get("min_equity_ratio", 30)),
         )
         run = st.button("スクリーニング実行", type="primary")
-        if st.button("サンプルデータ更新"):
-            sync_market(market="jp", use_sample=True)
-            st.success("サンプルデータを更新しました。")
+        render_manual_update_panel()
+
+    with st.expander("更新状態", expanded=False):
+        states = sync_states_dataframe()
+        if len(states):
+            st.dataframe(states, use_container_width=True)
+        else:
+            st.write("更新履歴はまだありません。")
 
     overrides = {"max_per": max_per, "max_pbr": max_pbr, "min_equity_ratio": min_equity_ratio}
     results, run_id = screen_companies(preset_name=preset, market=market, overrides=overrides, save=run)
@@ -174,4 +237,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

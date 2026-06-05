@@ -1,3 +1,5 @@
+import tempfile
+from pathlib import Path
 import unittest
 
 from src.analysis.scoring import recommendation_label, screen_companies
@@ -9,12 +11,18 @@ from src.ingestion.sample_data import seed_sample_data
 class ScoringWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        init_db()
-        conn = get_connection()
+        cls.tmpdir = tempfile.TemporaryDirectory()
+        cls.db_path = Path(cls.tmpdir.name) / "test_value_screener.sqlite"
+        init_db(cls.db_path)
+        conn = get_connection(cls.db_path)
         try:
             seed_sample_data(conn, reset=True)
         finally:
             conn.close()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmpdir.cleanup()
 
     def test_recommendation_labels(self):
         self.assertEqual(recommendation_label(90), "Strong Candidate")
@@ -24,7 +32,7 @@ class ScoringWorkflowTests(unittest.TestCase):
         self.assertEqual(recommendation_label(39), "Exclude")
 
     def test_balanced_screen_returns_candidates(self):
-        results, run_id = screen_companies("balanced", market="jp", save=True)
+        results, run_id = screen_companies("balanced", market="jp", db_path=self.db_path, save=True)
         self.assertTrue(run_id)
         self.assertGreater(len(results), 0)
         self.assertIn("total_score", results[0])

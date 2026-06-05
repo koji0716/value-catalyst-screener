@@ -46,7 +46,20 @@ def command_init(args):
 
 def command_sync(args):
     init_db()
-    result = sync_market(market=args.market, start_date=args.start_date, end_date=args.end_date, use_sample=True)
+    result = sync_market(
+        market=args.market,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        source=args.source,
+        mode=args.mode,
+        codes=args.codes,
+        limit=args.limit,
+        include_prices=not args.no_prices,
+        include_financials=not args.no_financials,
+        include_dividends=not args.no_dividends,
+        include_events=not args.no_events,
+        reset_sample=args.reset_sample,
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     print(DISCLAIMER)
 
@@ -220,6 +233,15 @@ def build_parser():
     sync.add_argument("--market", default="jp", choices=["jp", "us", "all"])
     sync.add_argument("--from", dest="start_date")
     sync.add_argument("--to", dest="end_date")
+    sync.add_argument("--source", default="auto", choices=["auto", "sample", "jquants"])
+    sync.add_argument("--mode", default="manual", choices=["manual", "daily", "backfill"], help="Label the sync run for state tracking.")
+    sync.add_argument("--codes", help="Comma-separated issue codes, for example: 7203,9432")
+    sync.add_argument("--limit", type=int, help="Limit the starter universe for price/financial sync.")
+    sync.add_argument("--no-prices", action="store_true", help="Skip stock price synchronization.")
+    sync.add_argument("--no-financials", action="store_true", help="Skip financial statement synchronization.")
+    sync.add_argument("--no-dividends", action="store_true", help="Skip dividend synchronization.")
+    sync.add_argument("--no-events", action="store_true", help="Skip earnings calendar event synchronization.")
+    sync.add_argument("--reset-sample", action="store_true", help="Reset sample tables when source=sample or auto fallback.")
     sync.set_defaults(func=command_sync)
 
     screen = sub.add_parser("screen")
