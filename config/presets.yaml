@@ -1,0 +1,107 @@
+balanced:
+  description: "割安度、財務安全性、業績、カタリストをバランスよく評価する標準設定"
+  market: "all"
+  holding_period_months: "6-12"
+  filters:
+    min_market_cap: 30000000000
+    min_average_volume: 50000000
+    exclude_negative_equity: true
+    exclude_operating_cf_negative: false
+    max_per: 18
+    max_pbr: 1.5
+    max_ev_ebitda: 10
+    min_roe: 5
+    min_equity_ratio: 30
+  weights:
+    valuation: 0.30
+    quality: 0.20
+    safety: 0.15
+    momentum: 0.15
+    catalyst: 0.15
+    risk: 0.05
+
+deep_value:
+  description: "PBR、PER、EV/EBITDAを重視して、極端に割安な銘柄を探す"
+  market: "all"
+  holding_period_months: "6-12"
+  filters:
+    min_market_cap: 10000000000
+    min_average_volume: 20000000
+    exclude_negative_equity: true
+    exclude_operating_cf_negative: false
+    max_per: 12
+    max_pbr: 1.0
+    max_ev_ebitda: 7
+    min_equity_ratio: 25
+  weights:
+    valuation: 0.45
+    quality: 0.10
+    safety: 0.15
+    momentum: 0.10
+    catalyst: 0.15
+    risk: 0.05
+
+quality_value:
+  description: "割安かつ収益性・財務品質が高い銘柄を探す"
+  market: "all"
+  holding_period_months: "6-12"
+  filters:
+    min_market_cap: 50000000000
+    min_average_volume: 100000000
+    exclude_negative_equity: true
+    exclude_operating_cf_negative: true
+    max_per: 22
+    max_pbr: 2.5
+    max_ev_ebitda: 12
+    min_roe: 10
+    min_operating_margin: 8
+    min_equity_ratio: 35
+  weights:
+    valuation: 0.25
+    quality: 0.30
+    safety: 0.15
+    momentum: 0.10
+    catalyst: 0.15
+    risk: 0.05
+
+catalyst_value:
+  description: "割安性に加えて、上方修正・増配・自社株買いなどのカタリストを重視する"
+  market: "all"
+  holding_period_months: "3-9"
+  filters:
+    min_market_cap: 20000000000
+    min_average_volume: 50000000
+    exclude_negative_equity: true
+    max_per: 20
+    max_pbr: 2.0
+    min_equity_ratio: 25
+    require_recent_catalyst: true
+    catalyst_lookback_days: 180
+  weights:
+    valuation: 0.25
+    quality: 0.15
+    safety: 0.10
+    momentum: 0.15
+    catalyst: 0.30
+    risk: 0.05
+
+rebound_value:
+  description: "割安で売られすぎている銘柄の反発候補を探す"
+  market: "all"
+  holding_period_months: "3-6"
+  filters:
+    min_market_cap: 10000000000
+    min_average_volume: 30000000
+    exclude_negative_equity: true
+    max_per: 18
+    max_pbr: 1.5
+    max_drawdown_from_52w_high: -25
+    min_equity_ratio: 25
+  weights:
+    valuation: 0.30
+    quality: 0.10
+    safety: 0.15
+    momentum: 0.25
+    catalyst: 0.15
+    risk: 0.05
+

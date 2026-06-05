@@ -1,0 +1,10 @@
+app:
+  name: "Value Catalyst Screener"
+  default_market: "jp"
+  db_path: "data/value_screener.sqlite"
+  disclaimer: "このアプリは投資助言ではありません。投資判断は自己責任であり、最終判断はユーザーが行ってください。"
+
+providers:
+  price_provider: "yfinance"
+  edgar_rate_limit_per_sec: 10
+
