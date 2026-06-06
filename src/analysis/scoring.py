@@ -160,6 +160,10 @@ def recent_text_blocks(conn, company_id, limit=5):
     return [dict(row) for row in rows]
 
 
+def positive_catalyst_count(events):
+    return len([event for event in events if (event.get("catalyst_score") or 0) > 0])
+
+
 def build_metrics(conn, company):
     company_id = company["id"]
     fin = latest_financial(conn, company_id)
@@ -244,7 +248,8 @@ def build_metrics(conn, company):
         "events": events,
         "filings": filings,
         "text_blocks": text_blocks,
-        "catalyst_count": len(events),
+        "event_count": len(events),
+        "catalyst_count": positive_catalyst_count(events),
         "risk_flags": risk_flags,
     }
 

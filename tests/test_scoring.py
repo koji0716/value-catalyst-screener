@@ -2,7 +2,7 @@ import tempfile
 from pathlib import Path
 import unittest
 
-from src.analysis.scoring import recommendation_label, screen_companies
+from src.analysis.scoring import positive_catalyst_count, recommendation_label, screen_companies
 from src.db.migrations import init_db
 from src.db.session import get_connection
 from src.ingestion.sample_data import seed_sample_data
@@ -36,6 +36,14 @@ class ScoringWorkflowTests(unittest.TestCase):
         self.assertTrue(run_id)
         self.assertGreater(len(results), 0)
         self.assertIn("total_score", results[0])
+
+    def test_positive_catalyst_count_excludes_risk_events(self):
+        events = [
+            {"event_type": "earnings_revision_up", "catalyst_score": 25},
+            {"event_type": "downward_revision", "catalyst_score": 0},
+            {"event_type": "going_concern", "catalyst_score": None},
+        ]
+        self.assertEqual(positive_catalyst_count(events), 1)
 
 
 if __name__ == "__main__":

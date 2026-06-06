@@ -350,7 +350,17 @@ def sync_jquants_financials(conn, client, codes):
 
 
 def dividend_amount_from_summary(record):
-    return to_float(first_value(record, "DivAnn", "FDivAnn", "NxFDivAnn"))
+    return to_float(
+        first_value(
+            record,
+            "ForecastDividendPerShareAnnual",
+            "ResultDividendPerShareAnnual",
+            "NextYearForecastDividendPerShareAnnual",
+            "DivAnn",
+            "FDivAnn",
+            "NxFDivAnn",
+        )
+    )
 
 
 def upsert_dividend_from_summary(conn, company_id, record):
@@ -393,6 +403,162 @@ def sync_jquants_dividends(conn, client, codes):
         for record in records:
             if upsert_dividend_from_summary(conn, company_id, record):
                 count += 1
+    conn.commit()
+    return count
+
+
+FORECAST_FIELDS = [
+    (
+        "operating_profit",
+        [
+            "ForecastOperatingProfit",
+            "NextYearForecastOperatingProfit",
+            "ForecastNonConsolidatedOperatingProfit",
+            "NextYearForecastNonConsolidatedOperatingProfit",
+            "FOP",
+            "NFOP",
+        ],
+    ),
+    (
+        "profit",
+        [
+            "ForecastProfit",
+            "NextYearForecastProfit",
+            "ForecastNonConsolidatedProfit",
+            "NextYearForecastNonConsolidatedProfit",
+            "FProfit",
+            "NFProfit",
+            "FNP",
+            "NFNP",
+        ],
+    ),
+    (
+        "eps",
+        [
+            "ForecastEarningsPerShare",
+            "NextYearForecastEarningsPerShare",
+            "ForecastNonConsolidatedEarningsPerShare",
+            "NextYearForecastNonConsolidatedEarningsPerShare",
+            "FEPS",
+            "NFEPS",
+        ],
+    ),
+]
+
+
+def disclosure_date(record):
+    return jquants_date(first_value(record, "DisclosedDate", "DiscDate", "Date")) or date.today().isoformat()
+
+
+def disclosure_sort_key(record):
+    return (
+        disclosure_date(record),
+        str(first_value(record, "DisclosedTime", "DiscTime", "Time") or ""),
+        str(first_value(record, "DisclosureNumber", "DisclosureNo", "DocID") or ""),
+    )
+
+
+def forecast_values(record):
+    values = {}
+    for metric, keys in FORECAST_FIELDS:
+        values[metric] = to_float(first_value(record, *keys))
+    return values
+
+
+def event_exists(conn, company_id, event_type, event_date, title):
+    return conn.execute(
+        """
+        SELECT 1
+        FROM events
+        WHERE company_id = ? AND source = 'jquants' AND event_type = ?
+          AND event_date = ? AND title = ?
+        LIMIT 1
+        """,
+        (company_id, event_type, event_date, title),
+    ).fetchone()
+
+
+def insert_jquants_event(conn, company_id, event_type, event_date, title, description, sentiment_score, catalyst_score):
+    if event_exists(conn, company_id, event_type, event_date, title):
+        return False
+    conn.execute(
+        """
+        INSERT INTO events (
+          company_id, event_date, event_type, title, description, source,
+          sentiment_score, catalyst_score
+        ) VALUES (?, ?, ?, ?, ?, 'jquants', ?, ?)
+        """,
+        (company_id, event_date, event_type, title, description, sentiment_score, catalyst_score),
+    )
+    return True
+
+
+def sync_jquants_statement_catalysts(conn, client, codes=None, revision_threshold=0.05):
+    count = 0
+    for code in parse_code_list(codes):
+        company_id = ensure_company_for_code(conn, code)
+        records = sorted(client.fetch_financial_statements(code=code), key=disclosure_sort_key)
+        forecasts_by_period = {}
+        dividends_by_period = {}
+        previous_profit = None
+        for record in records:
+            event_date = disclosure_date(record)
+            period_end = statement_period_end(record) or ""
+            forecast_key = (period_end, statement_fiscal_quarter(record) or "")
+            current_forecasts = forecast_values(record)
+            previous_forecasts = forecasts_by_period.get(forecast_key, {})
+
+            up_metrics = []
+            down_metrics = []
+            for metric, current_value in current_forecasts.items():
+                previous_value = previous_forecasts.get(metric)
+                if current_value is None or previous_value in (None, 0):
+                    continue
+                change = (current_value - previous_value) / abs(previous_value)
+                if change >= revision_threshold:
+                    up_metrics.append(metric)
+                elif change <= -revision_threshold:
+                    down_metrics.append(metric)
+
+            if up_metrics:
+                title = "業績予想の上方修正を検出"
+                description = "J-Quants財務サマリーの予想値が前回開示比で改善しました: %s" % ", ".join(up_metrics)
+                if insert_jquants_event(conn, company_id, "earnings_revision_up", event_date, title, description, 0.7, 25):
+                    count += 1
+            if down_metrics:
+                title = "業績予想の下方修正を検出"
+                description = "J-Quants財務サマリーの予想値が前回開示比で悪化しました: %s" % ", ".join(down_metrics)
+                if insert_jquants_event(conn, company_id, "downward_revision", event_date, title, description, -0.7, 0):
+                    count += 1
+
+            if any(value is not None for value in current_forecasts.values()):
+                forecasts_by_period[forecast_key] = {
+                    **previous_forecasts,
+                    **{metric: value for metric, value in current_forecasts.items() if value is not None},
+                }
+
+            dividend = dividend_amount_from_summary(record)
+            previous_dividend = dividends_by_period.get(period_end)
+            if dividend is not None and previous_dividend is not None and dividend > previous_dividend:
+                title = "増配を検出"
+                description = "J-Quants財務サマリーの年間配当が %.2f 円から %.2f 円へ増加しました。" % (
+                    previous_dividend,
+                    dividend,
+                )
+                if insert_jquants_event(conn, company_id, "dividend_increase", event_date, title, description, 0.6, 20):
+                    count += 1
+            if dividend is not None:
+                dividends_by_period[period_end] = dividend
+
+            profit = statement_net_income(record)
+            if previous_profit is not None and previous_profit < 0 and profit is not None and profit > 0:
+                title = "黒字転換を検出"
+                description = "J-Quants財務サマリーの純利益が赤字から黒字に転換しました。"
+                if insert_jquants_event(conn, company_id, "earnings_recovery", event_date, title, description, 0.6, 20):
+                    count += 1
+            if profit is not None:
+                previous_profit = profit
+
     conn.commit()
     return count
 

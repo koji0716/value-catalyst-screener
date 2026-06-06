@@ -10,6 +10,7 @@ from src.ingestion.jquants_sync import (
     sync_jquants_earnings_events,
     sync_jquants_financials,
     sync_jquants_prices,
+    sync_jquants_statement_catalysts,
 )
 from src.ingestion.sample_data import seed_sample_data
 from src.ingestion.sync_state import begin_sync_job, finish_sync_job, upsert_sync_state
@@ -274,7 +275,8 @@ def sync_jquants_market(
                 warnings.append("dividends: %s" % exc)
         if include_events:
             try:
-                inserted_events = sync_jquants_earnings_events(conn, client, codes=target_codes)
+                inserted_events += sync_jquants_statement_catalysts(conn, client, codes=target_codes)
+                inserted_events += sync_jquants_earnings_events(conn, client, codes=target_codes)
             except JQuantsError as exc:
                 warnings.append("events: %s" % exc)
         return {

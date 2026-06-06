@@ -51,6 +51,7 @@ python cli.py watchlist show
 - J-Quants財務サマリー同期
 - J-Quants配当データ同期
 - J-Quants決算予定イベント同期
+- J-Quants財務サマリー由来のカタリスト推定
 - EDINET DB年度財務・有報開示一覧・有報テキストリスク語同期
 - 手動更新履歴と最終同期状態の保存
 - プリセット読み込み
@@ -60,7 +61,7 @@ python cli.py watchlist show
 - Streamlit UI
 - CSV/HTMLレポート出力
 - 簡易バックテスト
-- EDINET / SEC EDGAR / TDnet クライアント雛形
+- EDINET / SEC EDGAR クライアント雛形
 
 ## ディレクトリ
 
@@ -79,7 +80,7 @@ value-catalyst-screener/
 1. MVP 1: サンプルデータ + SQLite + Streamlit + プリセットスクリーニング
 2. MVP 2: J-Quants認証、銘柄一覧、株価、財務、配当、決算予定
 3. MVP 3: EDINET DBによる年度財務、有報開示一覧、有報テキスト検索
-4. MVP 4: TDnetカタリスト分析
+4. MVP 4: 無料データによるカタリスト分析
 5. MVP 5: SEC EDGARと米国株価API
 
 ## J-Quants同期の挙動
@@ -87,6 +88,18 @@ value-catalyst-screener/
 `python cli.py sync --market jp` は `--source auto` と同じです。J-Quants設定があればJ-Quantsを使い、未設定または認証失敗時はサンプルデータへフォールバックします。明示的に失敗を見たい場合は `--source jquants` を指定してください。
 
 全銘柄の株価・財務を一気に取得するとAPI負荷が大きいため、価格・財務同期の対象は `config/settings.yaml` の `jquants_starter_codes` を初期ユニバースにしています。対象を変える場合は `--codes 7203,9432` または `--limit` を使ってください。
+
+## 無料カタリスト分析
+
+公式TDnet APIは有料サービスのため、MVPでは直接利用しません。代わりに、無料または既存キーで扱えるデータだけを使ってカタリスト候補を作ります。
+
+- J-Quants財務サマリー: 業績予想の上方修正、下方修正、増配、黒字転換を推定
+- J-Quants決算予定: 近い決算イベントを登録
+- EDINET DB有報テキスト: 継続企業、債務超過、上場廃止などのリスク語を検出
+
+J-QuantsのFreeプランは遅延データになるため、即時性のある売買判断ではなく、候補抽出・監視リスト作成・バックテスト寄りの用途として扱います。
+
+非公式TDnet APIや公開HTMLスクレイピングは、可用性・利用条件・仕様変更リスクが高いため標準実装から外しています。必要になった場合だけ、明示的なオプトイン機能として追加します。
 
 ## 手動更新ポリシー
 

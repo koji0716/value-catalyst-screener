@@ -5,6 +5,7 @@ from src.db.models import SCHEMA
 from src.ingestion.jquants_sync import (
     ensure_company_for_code,
     sync_jquants_earnings_events,
+    sync_jquants_statement_catalysts,
     parse_code_list,
     sync_jquants_prices,
     upsert_dividend_from_summary,
@@ -33,6 +34,26 @@ class FakeJQuantsClient:
         return [
             {"Date": "20260630", "Code": "72030", "CompanyName": "トヨタ自動車", "FiscalQuarter": "FY"},
             {"Date": "20260630", "Code": "94320", "CompanyName": "NTT", "FiscalQuarter": "FY"},
+        ]
+
+    def fetch_financial_statements(self, code=None, date_value=None):
+        return [
+            {
+                "DisclosedDate": "2026-01-31",
+                "CurPerEn": "2026-03-31",
+                "CurPerType": "FY",
+                "ForecastProfit": "1000000000",
+                "ForecastDividendPerShareAnnual": "50.0",
+                "Profit": "-100000000",
+            },
+            {
+                "DisclosedDate": "2026-02-28",
+                "CurPerEn": "2026-03-31",
+                "CurPerType": "FY",
+                "ForecastProfit": "1200000000",
+                "ForecastDividendPerShareAnnual": "60.0",
+                "Profit": "200000000",
+            },
         ]
 
 
@@ -133,6 +154,23 @@ class JQuantsSyncTests(unittest.TestCase):
             """
         ).fetchall()
         self.assertEqual([dict(row) for row in rows], [{"security_code": "7203", "event_type": "earnings_date_soon"}])
+
+    def test_statement_catalysts_detect_revision_dividend_and_recovery(self):
+        ensure_company_for_code(self.conn, "7203")
+        count = sync_jquants_statement_catalysts(self.conn, FakeJQuantsClient(), codes=["7203"])
+        self.assertEqual(count, 3)
+        rows = self.conn.execute(
+            """
+            SELECT event_type
+            FROM events
+            WHERE source = 'jquants'
+            ORDER BY event_type
+            """
+        ).fetchall()
+        self.assertEqual(
+            [row["event_type"] for row in rows],
+            ["dividend_increase", "earnings_recovery", "earnings_revision_up"],
+        )
 
 
 if __name__ == "__main__":
