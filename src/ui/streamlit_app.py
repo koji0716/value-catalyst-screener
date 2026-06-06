@@ -20,8 +20,8 @@ except Exception:
 from src.analysis.scoring import explain_ticker, screen_companies
 from src.db.migrations import init_db
 from src.db.session import get_connection
-from src.ingestion.sync_all import sync_market
-from src.ingestion.sync_state import latest_sync_states
+from src.ingestion.sync_all import sync_edgar_bulk_source, sync_jp_bulk_source, sync_market
+from src.ingestion.sync_state import latest_sync_jobs, latest_sync_states
 from src.nlp.report_generator import export_results
 from src.ui.components import disclaimer, format_money, format_pct, format_ratio
 from src.utils.file_utils import load_presets
@@ -78,12 +78,17 @@ def sync_states_dataframe():
         conn.close()
     rows = []
     for state in states:
+        result = parse_json_dict(state.get("result_json"))
         rows.append(
             {
                 "市場": state.get("market"),
                 "ソース": state.get("source"),
                 "モード": state.get("mode"),
                 "状態": state.get("status"),
+                "対象": result_count(result, "selected_records", "target_codes"),
+                "処理済み": result_count(result, "processed_codes", "processed_tickers"),
+                "スキップ": result.get("skipped_existing"),
+                "次offset": result.get("next_offset"),
                 "最終成功": state.get("last_success_at"),
                 "最終試行": state.get("last_attempt_at"),
                 "メッセージ": state.get("message"),
@@ -92,6 +97,58 @@ def sync_states_dataframe():
     if pd:
         return pd.DataFrame(rows)
     return rows
+
+
+def sync_jobs_dataframe():
+    conn = get_connection()
+    try:
+        jobs = latest_sync_jobs(conn, limit=12)
+    finally:
+        conn.close()
+    rows = []
+    for job in jobs:
+        result = parse_json_dict(job.get("result_json"))
+        rows.append(
+            {
+                "ID": job.get("id"),
+                "種類": job.get("job_type"),
+                "市場": job.get("market"),
+                "ソース": job.get("source"),
+                "モード": job.get("mode"),
+                "状態": job.get("status"),
+                "対象": result_count(result, "selected_records", "target_codes"),
+                "処理済み": result_count(result, "processed_codes", "processed_tickers"),
+                "スキップ": result.get("skipped_existing"),
+                "次offset": result.get("next_offset"),
+                "開始": job.get("started_at"),
+                "終了": job.get("finished_at"),
+                "メッセージ": job.get("message"),
+            }
+        )
+    if pd:
+        return pd.DataFrame(rows)
+    return rows
+
+
+def parse_json_dict(value):
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def result_count(result, scalar_key, list_key):
+    if result.get(scalar_key) is not None:
+        return result.get(scalar_key)
+    value = result.get(list_key)
+    if isinstance(value, list):
+        return len(value)
+    return None
 
 
 def first_code(value):
@@ -172,6 +229,63 @@ def render_manual_update_panel(market):
         result = sync_market(market=market, source="sample", mode="manual")
         st.success(result.get("message", "サンプルデータを更新しました。"))
     return first_code(codes)
+
+
+def render_bulk_update_panel(market):
+    st.header("一括取り込み")
+    bulk_limit = st.number_input("一回の処理件数", min_value=1, max_value=1000, value=50, step=10)
+    bulk_offset = st.number_input("開始offset", min_value=0, value=0, step=10)
+    master_only = st.checkbox("会社マスターのみ", value=True)
+    resume = st.checkbox("取得済みをスキップ", value=True)
+    bulk_start = st.date_input("一括取得開始日", value=date.today() - timedelta(days=420), key="bulk_start")
+
+    if market in ("jp", "all"):
+        sections = st.text_input("日本株市場区分", value="Prime,Standard,Growth")
+        if st.button("日本株一括取り込み"):
+            with st.spinner("J-Quants銘柄一覧から日本株を一括取り込み中..."):
+                try:
+                    result = sync_jp_bulk_source(
+                        start_date=bulk_start.isoformat(),
+                        sections=sections,
+                        offset=int(bulk_offset),
+                        limit=int(bulk_limit),
+                        include_prices=not master_only,
+                        include_financials=not master_only,
+                        include_dividends=not master_only,
+                        include_events=not master_only,
+                        resume=resume,
+                    )
+                    st.success(result.get("message", "日本株一括取り込みが完了しました。"))
+                    if result.get("rate_limited"):
+                        st.warning("APIレート制限を検出しました。next_offsetから再開してください。")
+                    if result.get("warnings"):
+                        st.warning(" / ".join(result["warnings"][:5]))
+                    st.json(result)
+                except Exception as exc:
+                    st.error(str(exc))
+
+    if market in ("us", "all"):
+        exchanges = st.text_input("米国株取引所", value="Nasdaq,NYSE")
+        if st.button("米国株一括取り込み"):
+            with st.spinner("SEC ticker/CIK一覧から米国株を一括取り込み中..."):
+                try:
+                    result = sync_edgar_bulk_source(
+                        start_date=bulk_start.isoformat(),
+                        exchanges=exchanges,
+                        offset=int(bulk_offset),
+                        limit=int(bulk_limit),
+                        include_prices=not master_only,
+                        include_financials=not master_only,
+                        include_filings=not master_only,
+                        include_dividends=not master_only,
+                        resume=resume,
+                    )
+                    st.success(result.get("message", "米国株一括取り込みが完了しました。"))
+                    if result.get("warnings"):
+                        st.warning(" / ".join(result["warnings"][:5]))
+                    st.json(result)
+                except Exception as exc:
+                    st.error(str(exc))
 
 
 def parse_risk_flags(value):
@@ -292,13 +406,19 @@ def main():
         )
         run = st.button("スクリーニング実行", type="primary")
         detail_hint = render_manual_update_panel(market)
+        render_bulk_update_panel(market)
 
-    with st.expander("更新状態", expanded=False):
+    with st.expander("更新状態", expanded=True):
         states = sync_states_dataframe()
         if len(states):
+            st.markdown("##### 最終更新状態")
             st.dataframe(states, use_container_width=True)
         else:
             st.write("更新履歴はまだありません。")
+        jobs = sync_jobs_dataframe()
+        if len(jobs):
+            st.markdown("##### 同期ジョブ履歴")
+            st.dataframe(jobs, use_container_width=True)
 
     overrides = {"max_per": max_per, "max_pbr": max_pbr, "min_equity_ratio": min_equity_ratio}
     results, run_id = screen_companies(preset_name=preset, market=market, overrides=overrides, save=run)

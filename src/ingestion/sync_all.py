@@ -1,5 +1,5 @@
 from src.db.session import get_connection
-from src.ingestion.edgar_sync import sync_edgar_market
+from src.ingestion.edgar_sync import sync_edgar_bulk_market, sync_edgar_market
 from src.ingestion.edinetdb_sync import sync_edinetdb_market
 from src.ingestion.jquants_sync import (
     clear_sample_events_and_filings,
@@ -13,6 +13,7 @@ from src.ingestion.jquants_sync import (
     sync_jquants_prices,
     sync_jquants_statement_catalysts,
 )
+from src.ingestion.jp_bulk_sync import sync_jp_bulk_market
 from src.ingestion.sample_data import seed_sample_data
 from src.ingestion.sync_state import begin_sync_job, finish_sync_job, upsert_sync_state
 from src.providers.jquants_client import JQuantsClient, JQuantsError
@@ -330,6 +331,172 @@ def sync_edgar_source(
         return result
     finally:
         conn.close()
+
+
+def sync_edgar_bulk_source(
+    start_date=None,
+    end_date=None,
+    exchanges=None,
+    offset=0,
+    limit=None,
+    user_agent=None,
+    include_prices=True,
+    include_financials=True,
+    include_filings=True,
+    include_dividends=True,
+    resume=True,
+    record_state=True,
+):
+    params = {
+        "market": "us",
+        "source": "edgar",
+        "mode": "bulk",
+        "start_date": start_date,
+        "end_date": end_date,
+        "exchanges": exchanges,
+        "offset": offset,
+        "limit": limit,
+        "include_prices": include_prices,
+        "include_financials": include_financials,
+        "include_filings": include_filings,
+        "include_dividends": include_dividends,
+        "resume": resume,
+    }
+    job_id = None
+    if record_state:
+        state_conn = get_connection()
+        try:
+            job_id = begin_sync_job(state_conn, "bulk_sync", "us", "edgar", "bulk", params)
+            upsert_sync_state(state_conn, "us", "edgar", "bulk", "running", params, message="米国株一括同期中")
+        finally:
+            state_conn.close()
+    conn = None
+    try:
+        client = EdgarClient(user_agent=user_agent)
+        if not client.is_configured():
+            raise EdgarError("SEC_USER_AGENT is not configured.")
+        conn = get_connection()
+        with client:
+            result = sync_edgar_bulk_market(
+                conn,
+                edgar_client=client,
+                exchanges=exchanges,
+                offset=offset,
+                limit=limit,
+                start_date=start_date,
+                end_date=end_date,
+                include_prices=include_prices,
+                include_financials=include_financials,
+                include_filings=include_filings,
+                include_dividends=include_dividends,
+                resume=resume,
+            )
+        result.update({"message": "SEC EDGARのticker/CIK一覧から米国株をバッチ同期しました。"})
+        if record_state:
+            state_conn = get_connection()
+            try:
+                status = "warning" if result.get("warnings") or result.get("rate_limited") else "success"
+                finish_sync_job(state_conn, job_id, status, result, result.get("message"))
+                upsert_sync_state(state_conn, "us", "edgar", "bulk", status, params, result, result.get("message"))
+            finally:
+                state_conn.close()
+        return result
+    except Exception as exc:
+        if record_state:
+            state_conn = get_connection()
+            try:
+                result = {"error": str(exc)}
+                finish_sync_job(state_conn, job_id, "failed", result, str(exc))
+                upsert_sync_state(state_conn, "us", "edgar", "bulk", "failed", params, result, str(exc))
+            finally:
+                state_conn.close()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def sync_jp_bulk_source(
+    start_date=None,
+    end_date=None,
+    sections=None,
+    offset=0,
+    limit=None,
+    include_prices=True,
+    include_financials=True,
+    include_dividends=True,
+    include_events=True,
+    resume=True,
+    record_state=True,
+):
+    params = {
+        "market": "jp",
+        "source": "jquants",
+        "mode": "bulk",
+        "start_date": start_date,
+        "end_date": end_date,
+        "sections": sections,
+        "offset": offset,
+        "limit": limit,
+        "include_prices": include_prices,
+        "include_financials": include_financials,
+        "include_dividends": include_dividends,
+        "include_events": include_events,
+        "resume": resume,
+    }
+    job_id = None
+    if record_state:
+        state_conn = get_connection()
+        try:
+            job_id = begin_sync_job(state_conn, "bulk_sync", "jp", "jquants", "bulk", params)
+            upsert_sync_state(state_conn, "jp", "jquants", "bulk", "running", params, message="日本株一括同期中")
+        finally:
+            state_conn.close()
+
+    conn = None
+    try:
+        client = JQuantsClient()
+        if not client.is_configured():
+            raise JQuantsError("JQUANTS_API_KEY is not configured.")
+        conn = get_connection()
+        with client:
+            result = sync_jp_bulk_market(
+                conn,
+                client=client,
+                sections=sections,
+                offset=offset,
+                limit=limit,
+                start_date=start_date,
+                end_date=end_date,
+                include_prices=include_prices,
+                include_financials=include_financials,
+                include_dividends=include_dividends,
+                include_events=include_events,
+                resume=resume,
+            )
+        result.update({"message": "J-Quantsの銘柄一覧から日本株をバッチ同期しました。"})
+        if record_state:
+            state_conn = get_connection()
+            try:
+                status = "warning" if result.get("warnings") or result.get("rate_limited") else "success"
+                finish_sync_job(state_conn, job_id, status, result, result.get("message"))
+                upsert_sync_state(state_conn, "jp", "jquants", "bulk", status, params, result, result.get("message"))
+            finally:
+                state_conn.close()
+        return result
+    except Exception as exc:
+        if record_state:
+            state_conn = get_connection()
+            try:
+                result = {"error": str(exc)}
+                finish_sync_job(state_conn, job_id, "failed", result, str(exc))
+                upsert_sync_state(state_conn, "jp", "jquants", "bulk", "failed", params, result, str(exc))
+            finally:
+                state_conn.close()
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 
 def sync_jquants_market(

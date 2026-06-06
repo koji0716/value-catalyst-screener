@@ -6,6 +6,7 @@ from src.utils.file_utils import load_settings
 
 
 STARTER_US_TICKERS = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "GM"]
+DEFAULT_FILING_FORMS = ("10-K", "10-Q", "8-K", "10-K/A", "10-Q/A")
 
 FACT_CONCEPTS = {
     "revenue": ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet"],
@@ -45,6 +46,16 @@ def parse_ticker_list(tickers):
 def starter_us_tickers(settings=None):
     configured = ((settings or {}).get("providers") or {}).get("us_starter_tickers")
     return parse_ticker_list(configured) or STARTER_US_TICKERS
+
+
+def parse_exchange_list(exchanges):
+    if not exchanges or str(exchanges).lower() == "all":
+        return []
+    if isinstance(exchanges, str):
+        parts = exchanges.split(",")
+    else:
+        parts = exchanges
+    return [str(exchange).strip().lower() for exchange in parts if str(exchange).strip()]
 
 
 def to_float(value):
@@ -123,6 +134,23 @@ def ticker_lookup(records):
         if ticker:
             lookup[ticker] = record
     return lookup
+
+
+def filtered_ticker_records(records, exchanges=None, offset=0, limit=None):
+    exchange_filters = set(parse_exchange_list(exchanges))
+    filtered = []
+    for record in records:
+        ticker = str(record.get("ticker") or "").strip().upper()
+        if not ticker:
+            continue
+        if exchange_filters:
+            exchange = str(record.get("exchange") or "").strip().lower()
+            if exchange not in exchange_filters:
+                continue
+        filtered.append(record)
+    start = max(int(offset or 0), 0)
+    end = None if limit in (None, "") else start + max(int(limit), 0)
+    return filtered[start:end], len(filtered)
 
 
 def annual_fact_values(companyfacts, concepts):
@@ -309,6 +337,144 @@ def upsert_filing(conn, company_id, record):
     return True
 
 
+def company_has_requested_edgar_data(
+    conn,
+    company_id,
+    include_prices=True,
+    include_financials=True,
+    include_filings=True,
+    include_dividends=True,
+):
+    checks = []
+    if include_financials:
+        checks.append(("financial_facts", "source = 'edgar'"))
+    if include_filings:
+        checks.append(("filings", "source = 'edgar'"))
+    if include_prices:
+        checks.append(("prices", "source = 'yfinance'"))
+    if include_dividends:
+        checks.append(("corporate_actions", "source = 'yfinance' AND action_type = 'dividend'"))
+    if not checks:
+        return True
+    for table, condition in checks:
+        row = conn.execute(
+            "SELECT 1 FROM %s WHERE company_id = ? AND %s LIMIT 1" % (table, condition),
+            (company_id,),
+        ).fetchone()
+        if not row:
+            return False
+    return True
+
+
+def yfinance_symbol(ticker):
+    return str(ticker).upper().replace(".", "-")
+
+
+def sync_edgar_record(
+    conn,
+    ticker,
+    record,
+    edgar_client,
+    price_client,
+    start_date=None,
+    end_date=None,
+    include_prices=True,
+    include_financials=True,
+    include_filings=True,
+    include_dividends=True,
+    filing_forms=DEFAULT_FILING_FORMS,
+):
+    warnings = []
+    existing = find_company(conn, ticker=ticker, cik=record.get("cik") or record.get("cik_str"))
+    company_id = upsert_company(conn, ticker, record)
+    inserted_company = 0 if existing else 1
+    updated_company = 1 if existing else 0
+    inserted_financials = 0
+    inserted_prices = 0
+    inserted_filings = 0
+    inserted_actions = 0
+    cik = record.get("cik") or record.get("cik_str")
+
+    if include_financials:
+        try:
+            facts = edgar_client.fetch_companyfacts(cik)
+            for financial in map_companyfacts(facts):
+                if upsert_financial(conn, company_id, financial):
+                    inserted_financials += 1
+        except EdgarError as exc:
+            warnings.append("%s financials: %s" % (ticker, exc))
+
+    if include_filings:
+        try:
+            submissions = edgar_client.fetch_submissions(cik)
+            recent = (submissions.get("filings") or {}).get("recent") or {}
+            forms = recent.get("form") or []
+            allowed_forms = set(filing_forms or DEFAULT_FILING_FORMS)
+            for idx, form in enumerate(forms[:40]):
+                if form not in allowed_forms:
+                    continue
+                filing = {key: values[idx] if idx < len(values) else None for key, values in recent.items()}
+                filing["cik"] = cik
+                if upsert_filing(conn, company_id, filing):
+                    inserted_filings += 1
+        except EdgarError as exc:
+            warnings.append("%s filings: %s" % (ticker, exc))
+
+    if include_prices:
+        try:
+            prices = price_client.fetch_ohlc(
+                yfinance_symbol(ticker),
+                start_date=start_date or (date.today() - timedelta(days=420)).isoformat(),
+                end_date=end_date,
+            )
+            for price in prices:
+                if upsert_price(conn, company_id, price):
+                    inserted_prices += 1
+        except Exception as exc:
+            warnings.append("%s prices: %s" % (ticker, exc))
+
+    if include_dividends:
+        try:
+            for dividend in price_client.fetch_dividends(yfinance_symbol(ticker)):
+                conn.execute(
+                    """
+                    DELETE FROM corporate_actions
+                    WHERE company_id = ? AND source = 'yfinance' AND action_type = 'dividend'
+                      AND announced_date = ?
+                    """,
+                    (company_id, dividend.get("date")),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO corporate_actions (
+                      company_id, action_type, announced_date, effective_date, amount,
+                      ratio, description, source
+                    ) VALUES (?, 'dividend', ?, ?, ?, NULL, ?, 'yfinance')
+                    """,
+                    (
+                        company_id,
+                        dividend.get("date"),
+                        dividend.get("date"),
+                        dividend.get("amount"),
+                        "Dividend %.4f USD" % dividend.get("amount"),
+                    ),
+                )
+                inserted_actions += 1
+        except Exception as exc:
+            warnings.append("%s dividends: %s" % (ticker, exc))
+
+    conn.commit()
+    return {
+        "inserted_companies": inserted_company,
+        "updated_companies": updated_company,
+        "inserted_financials": inserted_financials,
+        "inserted_prices": inserted_prices,
+        "inserted_filings": inserted_filings,
+        "inserted_actions": inserted_actions,
+        "warnings": warnings,
+    }
+
+
 def sync_edgar_market(
     conn,
     edgar_client=None,
@@ -351,71 +517,116 @@ def sync_edgar_market(
             if not record:
                 result["warnings"].append("%s: SEC ticker record not found" % ticker)
                 continue
-            company_id = upsert_company(conn, ticker, record)
-            result["updated_companies"] += 1
-            cik = record.get("cik") or record.get("cik_str")
+            item = sync_edgar_record(
+                conn,
+                ticker,
+                record,
+                edgar_client,
+                price_client,
+                start_date=start_date,
+                end_date=end_date,
+                include_prices=include_prices,
+                include_financials=include_financials,
+                include_filings=include_filings,
+                include_dividends=include_dividends,
+            )
+            for key in ["inserted_financials", "inserted_prices", "inserted_filings", "inserted_actions"]:
+                result[key] += item[key]
+            result["updated_companies"] += item["inserted_companies"] + item["updated_companies"]
+            result["warnings"].extend(item["warnings"])
+        return result
+    finally:
+        if close_edgar:
+            edgar_client.close()
 
-            if include_financials:
-                try:
-                    facts = edgar_client.fetch_companyfacts(cik)
-                    for financial in map_companyfacts(facts):
-                        if upsert_financial(conn, company_id, financial):
-                            result["inserted_financials"] += 1
-                except EdgarError as exc:
-                    result["warnings"].append("%s financials: %s" % (ticker, exc))
 
-            if include_filings:
-                try:
-                    submissions = edgar_client.fetch_submissions(cik)
-                    recent = (submissions.get("filings") or {}).get("recent") or {}
-                    forms = recent.get("form") or []
-                    for idx, form in enumerate(forms[:40]):
-                        if form not in ("10-K", "10-Q", "8-K", "10-K/A", "10-Q/A"):
-                            continue
-                        filing = {key: values[idx] if idx < len(values) else None for key, values in recent.items()}
-                        filing["cik"] = cik
-                        if upsert_filing(conn, company_id, filing):
-                            result["inserted_filings"] += 1
-                except EdgarError as exc:
-                    result["warnings"].append("%s filings: %s" % (ticker, exc))
+def sync_edgar_bulk_market(
+    conn,
+    edgar_client=None,
+    price_client=None,
+    exchanges=None,
+    offset=0,
+    limit=None,
+    start_date=None,
+    end_date=None,
+    include_prices=True,
+    include_financials=True,
+    include_filings=True,
+    include_dividends=True,
+    resume=True,
+):
+    close_edgar = edgar_client is None
+    edgar_client = edgar_client or EdgarClient()
+    price_client = price_client or PriceClient()
+    if not edgar_client.is_configured():
+        raise EdgarError("SEC_USER_AGENT is not configured.")
 
-            if include_prices:
-                prices = price_client.fetch_ohlc(
-                    ticker,
-                    start_date=start_date or (date.today() - timedelta(days=420)).isoformat(),
-                    end_date=end_date,
-                )
-                for price in prices:
-                    if upsert_price(conn, company_id, price):
-                        result["inserted_prices"] += 1
-
-            if include_dividends:
-                for dividend in price_client.fetch_dividends(ticker):
-                    conn.execute(
-                        """
-                        DELETE FROM corporate_actions
-                        WHERE company_id = ? AND source = 'yfinance' AND action_type = 'dividend'
-                          AND announced_date = ?
-                        """,
-                        (company_id, dividend.get("date")),
-                    )
-                    conn.execute(
-                        """
-                        INSERT INTO corporate_actions (
-                          company_id, action_type, announced_date, effective_date, amount,
-                          ratio, description, source
-                        ) VALUES (?, 'dividend', ?, ?, ?, NULL, ?, 'yfinance')
-                        """,
-                        (
-                            company_id,
-                            dividend.get("date"),
-                            dividend.get("date"),
-                            dividend.get("amount"),
-                            "Dividend %.4f USD" % dividend.get("amount"),
-                        ),
-                    )
-                    result["inserted_actions"] += 1
-            conn.commit()
+    result = {
+        "market": "us",
+        "source": "edgar",
+        "mode": "bulk",
+        "offset": int(offset or 0),
+        "limit": limit,
+        "exchanges": parse_exchange_list(exchanges) or ["all"],
+        "available_records": 0,
+        "selected_records": 0,
+        "processed_tickers": [],
+        "skipped_existing": 0,
+        "inserted_companies": 0,
+        "updated_companies": 0,
+        "inserted_financials": 0,
+        "inserted_prices": 0,
+        "inserted_filings": 0,
+        "inserted_actions": 0,
+        "warnings": [],
+    }
+    try:
+        records, available = filtered_ticker_records(
+            edgar_client.fetch_company_tickers(),
+            exchanges=exchanges,
+            offset=offset,
+            limit=limit,
+        )
+        result["available_records"] = available
+        result["selected_records"] = len(records)
+        result["next_offset"] = int(offset or 0) + len(records)
+        for record in records:
+            ticker = str(record.get("ticker") or "").upper()
+            existing = find_company(conn, ticker=ticker, cik=record.get("cik") or record.get("cik_str"))
+            if resume and existing and company_has_requested_edgar_data(
+                conn,
+                existing["id"],
+                include_prices=include_prices,
+                include_financials=include_financials,
+                include_filings=include_filings,
+                include_dividends=include_dividends,
+            ):
+                result["skipped_existing"] += 1
+                continue
+            item = sync_edgar_record(
+                conn,
+                ticker,
+                record,
+                edgar_client,
+                price_client,
+                start_date=start_date,
+                end_date=end_date,
+                include_prices=include_prices,
+                include_financials=include_financials,
+                include_filings=include_filings,
+                include_dividends=include_dividends,
+            )
+            result["processed_tickers"].append(ticker)
+            for key in [
+                "inserted_companies",
+                "updated_companies",
+                "inserted_financials",
+                "inserted_prices",
+                "inserted_filings",
+                "inserted_actions",
+            ]:
+                result[key] += item[key]
+            result["warnings"].extend(item["warnings"])
         return result
     finally:
         if close_edgar:

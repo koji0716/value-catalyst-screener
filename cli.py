@@ -9,8 +9,10 @@ from src.analysis.backtest import run_simple_backtest
 from src.analysis.scoring import explain_ticker, screen_companies
 from src.db.migrations import init_db
 from src.db.session import get_connection
-from src.ingestion.sync_all import sync_market
+from src.ingestion.sync_all import sync_edgar_bulk_source, sync_jp_bulk_source, sync_market
 from src.nlp.report_generator import export_results
+from src.providers.edgar_client import EdgarError
+from src.providers.jquants_client import JQuantsError
 from src.utils.file_utils import DISCLAIMER, ensure_runtime_dirs, load_presets
 
 
@@ -60,6 +62,49 @@ def command_sync(args):
         include_events=not args.no_events,
         reset_sample=args.reset_sample,
     )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(DISCLAIMER)
+
+
+def command_bulk_sync_us(args):
+    init_db()
+    try:
+        result = sync_edgar_bulk_source(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            exchanges=args.exchange,
+            offset=args.offset,
+            limit=args.limit,
+            user_agent=args.user_agent,
+            include_prices=not args.no_prices and not args.master_only,
+            include_financials=not args.no_financials and not args.master_only,
+            include_filings=not args.no_filings and not args.master_only,
+            include_dividends=not args.no_dividends and not args.master_only,
+            resume=not args.no_resume,
+        )
+    except EdgarError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(DISCLAIMER)
+
+
+def command_bulk_sync_jp(args):
+    init_db()
+    try:
+        result = sync_jp_bulk_source(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            sections=args.section,
+            offset=args.offset,
+            limit=args.limit,
+            include_prices=not args.no_prices and not args.master_only,
+            include_financials=not args.no_financials and not args.master_only,
+            include_dividends=not args.no_dividends and not args.master_only,
+            include_events=not args.no_events and not args.master_only,
+            resume=not args.no_resume,
+        )
+    except JQuantsError as exc:
+        raise SystemExit(str(exc)) from exc
     print(json.dumps(result, ensure_ascii=False, indent=2))
     print(DISCLAIMER)
 
@@ -243,6 +288,35 @@ def build_parser():
     sync.add_argument("--no-events", action="store_true", help="Skip earnings calendar event synchronization.")
     sync.add_argument("--reset-sample", action="store_true", help="Reset sample tables when source=sample or auto fallback.")
     sync.set_defaults(func=command_sync)
+
+    bulk_us = sub.add_parser("bulk-sync-us")
+    bulk_us.add_argument("--from", dest="start_date")
+    bulk_us.add_argument("--to", dest="end_date")
+    bulk_us.add_argument("--exchange", help="Comma-separated SEC exchange names. Use all or omit for all exchanges.")
+    bulk_us.add_argument("--offset", type=int, default=0, help="Start position in the SEC ticker list after filtering.")
+    bulk_us.add_argument("--limit", type=int, help="Maximum number of SEC ticker records to process.")
+    bulk_us.add_argument("--user-agent", help="Temporary SEC User-Agent, e.g. 'ValueCatalystScreener name@example.com'.")
+    bulk_us.add_argument("--master-only", action="store_true", help="Only import SEC ticker/CIK company master records.")
+    bulk_us.add_argument("--no-prices", action="store_true", help="Skip yfinance stock price synchronization.")
+    bulk_us.add_argument("--no-financials", action="store_true", help="Skip SEC companyfacts synchronization.")
+    bulk_us.add_argument("--no-filings", action="store_true", help="Skip SEC submissions/filing list synchronization.")
+    bulk_us.add_argument("--no-dividends", action="store_true", help="Skip yfinance dividend synchronization.")
+    bulk_us.add_argument("--no-resume", action="store_true", help="Reprocess records even when requested data already exists.")
+    bulk_us.set_defaults(func=command_bulk_sync_us)
+
+    bulk_jp = sub.add_parser("bulk-sync-jp")
+    bulk_jp.add_argument("--from", dest="start_date")
+    bulk_jp.add_argument("--to", dest="end_date")
+    bulk_jp.add_argument("--section", help="Comma-separated market sections, e.g. Prime,Standard,Growth. Use all or omit for all.")
+    bulk_jp.add_argument("--offset", type=int, default=0, help="Start position in the J-Quants listed-info records after filtering.")
+    bulk_jp.add_argument("--limit", type=int, help="Maximum number of Japanese issue records to process.")
+    bulk_jp.add_argument("--master-only", action="store_true", help="Only import J-Quants listed company master records.")
+    bulk_jp.add_argument("--no-prices", action="store_true", help="Skip J-Quants stock price synchronization.")
+    bulk_jp.add_argument("--no-financials", action="store_true", help="Skip J-Quants financial summary synchronization.")
+    bulk_jp.add_argument("--no-dividends", action="store_true", help="Skip J-Quants dividend synchronization.")
+    bulk_jp.add_argument("--no-events", action="store_true", help="Skip J-Quants catalyst/event synchronization.")
+    bulk_jp.add_argument("--no-resume", action="store_true", help="Reprocess records even when requested data already exists.")
+    bulk_jp.set_defaults(func=command_bulk_sync_jp)
 
     screen = sub.add_parser("screen")
     add_common_screen_args(screen)

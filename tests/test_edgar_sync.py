@@ -2,7 +2,7 @@ import sqlite3
 import unittest
 
 from src.db.models import SCHEMA
-from src.ingestion.edgar_sync import map_companyfacts, sync_edgar_market
+from src.ingestion.edgar_sync import filtered_ticker_records, map_companyfacts, sync_edgar_bulk_market, sync_edgar_market
 
 
 class FakeEdgarClient:
@@ -19,6 +19,18 @@ class FakeEdgarClient:
                 "cik": 320193,
                 "name": "Apple Inc.",
                 "exchange": "Nasdaq",
+            },
+            {
+                "ticker": "GM",
+                "cik": 1467858,
+                "name": "General Motors Company",
+                "exchange": "NYSE",
+            },
+            {
+                "ticker": "OTCM",
+                "cik": 999999,
+                "name": "OTC Markets Group Inc.",
+                "exchange": "OTC",
             }
         ]
 
@@ -118,6 +130,47 @@ class EdgarSyncTests(unittest.TestCase):
 
         filing = self.conn.execute("SELECT * FROM filings WHERE source = 'edgar'").fetchone()
         self.assertEqual(filing["document_type"], "10-K")
+
+    def test_filtered_ticker_records_support_exchange_offset_and_limit(self):
+        rows, available = filtered_ticker_records(
+            FakeEdgarClient().fetch_company_tickers(),
+            exchanges="nasdaq,nyse",
+            offset=1,
+            limit=1,
+        )
+        self.assertEqual(available, 2)
+        self.assertEqual([row["ticker"] for row in rows], ["GM"])
+
+    def test_sync_edgar_bulk_market_can_import_master_only_and_resume(self):
+        result = sync_edgar_bulk_market(
+            self.conn,
+            edgar_client=FakeEdgarClient(),
+            price_client=FakePriceClient(),
+            exchanges="Nasdaq,NYSE",
+            limit=2,
+            include_prices=False,
+            include_financials=False,
+            include_filings=False,
+            include_dividends=False,
+        )
+        self.assertEqual(result["available_records"], 2)
+        self.assertEqual(result["selected_records"], 2)
+        self.assertEqual(result["inserted_companies"], 2)
+        self.assertEqual(result["processed_tickers"], ["AAPL", "GM"])
+
+        second = sync_edgar_bulk_market(
+            self.conn,
+            edgar_client=FakeEdgarClient(),
+            price_client=FakePriceClient(),
+            exchanges="Nasdaq,NYSE",
+            limit=2,
+            include_prices=False,
+            include_financials=False,
+            include_filings=False,
+            include_dividends=False,
+        )
+        self.assertEqual(second["skipped_existing"], 2)
+        self.assertEqual(second["processed_tickers"], [])
 
 
 if __name__ == "__main__":
