@@ -16,3 +16,10 @@ providers:
     - "7267"
     - "6902"
     - "1605"
+  us_starter_tickers:
+    - "AAPL"
+    - "MSFT"
+    - "NVDA"
+    - "GOOGL"
+    - "AMZN"
+    - "GM"

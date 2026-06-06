@@ -23,6 +23,19 @@ def format_jpy(value):
     return "%.0f円" % value
 
 
+def format_money(value, currency=None):
+    if currency == "USD":
+        if value is None:
+            return "N/A"
+        if abs(value) >= 1_000_000_000_000:
+            return "$%.2fT" % (value / 1_000_000_000_000)
+        if abs(value) >= 1_000_000_000:
+            return "$%.2fB" % (value / 1_000_000_000)
+        if abs(value) >= 1_000_000:
+            return "$%.2fM" % (value / 1_000_000)
+        return "$%.2f" % value
+    return format_jpy(value)
+
+
 def disclaimer():
     return DISCLAIMER
-

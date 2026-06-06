@@ -1,4 +1,5 @@
 from src.db.session import get_connection
+from src.ingestion.edgar_sync import sync_edgar_market
 from src.ingestion.edinetdb_sync import sync_edinetdb_market
 from src.ingestion.jquants_sync import (
     clear_sample_events_and_filings,
@@ -15,6 +16,7 @@ from src.ingestion.jquants_sync import (
 from src.ingestion.sample_data import seed_sample_data
 from src.ingestion.sync_state import begin_sync_job, finish_sync_job, upsert_sync_state
 from src.providers.jquants_client import JQuantsClient, JQuantsError
+from src.providers.edgar_client import EdgarClient, EdgarError
 from src.utils.file_utils import load_settings
 
 
@@ -110,6 +112,64 @@ def _sync_market_impl(
     include_events=True,
     reset_sample=False,
 ):
+    if market == "all":
+        if source in ("auto", "sample"):
+            routes = [("jp", source), ("us", source)]
+        elif source in ("jquants", "edinetdb"):
+            routes = [("jp", source)]
+        elif source == "edgar":
+            routes = [("us", source)]
+        else:
+            raise ValueError("Unknown sync source: %s" % source)
+        results = []
+        for idx, (route_market, route_source) in enumerate(routes):
+            results.append(
+                _sync_market_impl(
+                    market=route_market,
+                    start_date=start_date,
+                    end_date=end_date,
+                    source=route_source,
+                    mode=mode,
+                    codes=codes,
+                    limit=limit,
+                    include_prices=include_prices,
+                    include_financials=include_financials,
+                    include_dividends=include_dividends,
+                    include_events=include_events,
+                    reset_sample=reset_sample and idx == 0,
+                )
+            )
+        return combine_market_results(source, results)
+
+    if market == "us":
+        if source == "sample":
+            return sync_sample_market(market, start_date, end_date, reset_sample=reset_sample)
+        if source not in ("auto", "edgar"):
+            raise ValueError("Unknown sync source for US market: %s" % source)
+        client = EdgarClient()
+        if not client.is_configured():
+            if source == "edgar":
+                raise EdgarError("SEC_USER_AGENT is not configured.")
+            return sync_sample_market(market, start_date, end_date, reset_sample=reset_sample)
+        try:
+            with client:
+                return sync_edgar_source(
+                    client=client,
+                    market=market,
+                    start_date=start_date,
+                    end_date=end_date,
+                    codes=codes,
+                    limit=limit,
+                    include_prices=include_prices,
+                    include_financials=include_financials,
+                    include_filings=include_events,
+                    include_dividends=include_dividends,
+                )
+        except EdgarError:
+            if source == "edgar":
+                raise
+            return sync_sample_market(market, start_date, end_date, reset_sample=reset_sample)
+
     if market not in ("jp", "all"):
         return {
             "market": market,
@@ -119,7 +179,7 @@ def _sync_market_impl(
             "message": "現時点では日本株同期を優先実装しています。",
         }
 
-    if source not in ("auto", "sample", "jquants", "edinetdb"):
+    if source not in ("auto", "sample", "jquants", "edinetdb", "edgar"):
         raise ValueError("Unknown sync source: %s" % source)
 
     if source == "sample":
@@ -163,7 +223,8 @@ def _sync_market_impl(
 def sync_sample_market(market, start_date=None, end_date=None, reset_sample=False):
     conn = get_connection()
     try:
-        inserted = seed_sample_data(conn, reset=reset_sample)
+        inserted = seed_sample_data(conn, reset=reset_sample, market=market)
+        market_label = "日米" if market == "all" else ("米国株" if market == "us" else "日本株")
         return {
             "market": market,
             "source": "sample",
@@ -174,10 +235,40 @@ def sync_sample_market(market, start_date=None, end_date=None, reset_sample=Fals
             "inserted_financials": 0,
             "inserted_dividends": 0,
             "inserted_events": 0,
-            "message": "サンプル日本株データを同期しました。",
+            "message": "サンプル%sデータを同期しました。" % market_label,
         }
     finally:
         conn.close()
+
+
+def combine_market_results(source, results):
+    combined = {
+        "market": "all",
+        "source": "mixed" if source == "auto" else source,
+        "results": results,
+        "warnings": [],
+        "message": "日米データを同期しました。",
+    }
+    numeric_keys = [
+        "inserted_companies",
+        "updated_companies",
+        "inserted_prices",
+        "inserted_financials",
+        "inserted_dividends",
+        "inserted_events",
+        "inserted_filings",
+        "inserted_actions",
+        "inserted_text_blocks",
+        "inserted_risk_events",
+    ]
+    for key in numeric_keys:
+        total = sum(int(result.get(key) or 0) for result in results)
+        if total:
+            combined[key] = total
+    for result in results:
+        for warning in result.get("warnings") or []:
+            combined["warnings"].append("%s: %s" % (result.get("market"), warning))
+    return combined
 
 
 def sync_edinetdb_source(
@@ -204,6 +295,38 @@ def sync_edinetdb_source(
                 "message": "EDINET DBから有報・財務データを同期しました。",
             }
         )
+        return result
+    finally:
+        conn.close()
+
+
+def sync_edgar_source(
+    client,
+    market="us",
+    start_date=None,
+    end_date=None,
+    codes=None,
+    limit=None,
+    include_prices=True,
+    include_financials=True,
+    include_filings=True,
+    include_dividends=True,
+):
+    conn = get_connection()
+    try:
+        result = sync_edgar_market(
+            conn,
+            edgar_client=client,
+            tickers=codes,
+            limit=limit,
+            start_date=start_date,
+            end_date=end_date,
+            include_prices=include_prices,
+            include_financials=include_financials,
+            include_filings=include_filings,
+            include_dividends=include_dividends,
+        )
+        result.update({"market": market, "message": "SEC EDGARと株価APIから米国株データを同期しました。"})
         return result
     finally:
         conn.close()

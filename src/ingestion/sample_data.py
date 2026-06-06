@@ -1,6 +1,8 @@
 import math
 from datetime import date, timedelta
 
+from src.analysis.catalyst import EVENT_POINTS
+
 
 SAMPLE_COMPANIES = [
     {
@@ -236,15 +238,133 @@ SAMPLE_COMPANIES = [
             ("dividend_increase", "増配予定を発表", 82, 0.6),
         ],
     },
+    {
+        "market": "us",
+        "ticker": "AAPL",
+        "security_code": None,
+        "edinet_code": None,
+        "company_name": "Apple Inc.",
+        "exchange": "Nasdaq",
+        "sector": "Information Technology",
+        "industry": "Consumer Electronics",
+        "country": "US",
+        "currency": "USD",
+        "price": 196.5,
+        "market_cap": 2_980_000_000_000,
+        "revenue": 391_000_000_000,
+        "operating_income": 123_000_000_000,
+        "net_income": 94_000_000_000,
+        "ebitda": 135_000_000_000,
+        "equity": 62_000_000_000,
+        "assets": 364_000_000_000,
+        "debt": 96_000_000_000,
+        "cash": 67_000_000_000,
+        "ocf": 118_000_000_000,
+        "fcf": 108_000_000_000,
+        "eps": 6.12,
+        "trend": 0.10,
+        "volume": 58_000_000,
+        "events": [("share_buyback", "Large buyback authorization", 45, 0.7)],
+    },
+    {
+        "market": "us",
+        "ticker": "MSFT",
+        "security_code": None,
+        "edinet_code": None,
+        "company_name": "Microsoft Corporation",
+        "exchange": "Nasdaq",
+        "sector": "Information Technology",
+        "industry": "Software",
+        "country": "US",
+        "currency": "USD",
+        "price": 430.0,
+        "market_cap": 3_200_000_000_000,
+        "revenue": 245_000_000_000,
+        "operating_income": 110_000_000_000,
+        "net_income": 88_000_000_000,
+        "ebitda": 125_000_000_000,
+        "equity": 268_000_000_000,
+        "assets": 512_000_000_000,
+        "debt": 82_000_000_000,
+        "cash": 75_000_000_000,
+        "ocf": 119_000_000_000,
+        "fcf": 74_000_000_000,
+        "eps": 11.8,
+        "trend": 0.16,
+        "volume": 22_000_000,
+        "events": [("earnings_revision_up", "Cloud growth outlook raised", 72, 0.8)],
+    },
+    {
+        "market": "us",
+        "ticker": "NVDA",
+        "security_code": None,
+        "edinet_code": None,
+        "company_name": "NVIDIA Corporation",
+        "exchange": "Nasdaq",
+        "sector": "Information Technology",
+        "industry": "Semiconductors",
+        "country": "US",
+        "currency": "USD",
+        "price": 118.0,
+        "market_cap": 2_900_000_000_000,
+        "revenue": 130_000_000_000,
+        "operating_income": 81_000_000_000,
+        "net_income": 73_000_000_000,
+        "ebitda": 86_000_000_000,
+        "equity": 76_000_000_000,
+        "assets": 111_000_000_000,
+        "debt": 11_000_000_000,
+        "cash": 35_000_000_000,
+        "ocf": 64_000_000_000,
+        "fcf": 58_000_000_000,
+        "eps": 2.95,
+        "trend": 0.22,
+        "volume": 260_000_000,
+        "events": [("large_order", "Data center demand acceleration", 30, 0.7)],
+    },
+    {
+        "market": "us",
+        "ticker": "GM",
+        "security_code": None,
+        "edinet_code": None,
+        "company_name": "General Motors Company",
+        "exchange": "NYSE",
+        "sector": "Consumer Discretionary",
+        "industry": "Automobiles",
+        "country": "US",
+        "currency": "USD",
+        "price": 48.0,
+        "market_cap": 52_000_000_000,
+        "revenue": 187_000_000_000,
+        "operating_income": 12_800_000_000,
+        "net_income": 10_600_000_000,
+        "ebitda": 24_000_000_000,
+        "equity": 100_000_000_000,
+        "assets": 284_000_000_000,
+        "debt": 120_000_000_000,
+        "cash": 28_000_000_000,
+        "ocf": 20_000_000_000,
+        "fcf": 10_500_000_000,
+        "eps": 9.5,
+        "trend": -0.04,
+        "volume": 14_000_000,
+        "events": [
+            ("share_buyback", "Buyback program expanded", 64, 0.7),
+            ("earnings_revision_up", "Full-year guidance raised", 92, 0.7),
+        ],
+    },
 ]
 
 
-def seed_sample_data(conn, reset=False):
+def seed_sample_data(conn, reset=False, market=None):
     if reset:
         clear_sample_tables(conn)
 
+    target_markets = None if market in (None, "all") else {market}
     inserted = 0
     for item in SAMPLE_COMPANIES:
+        if target_markets and item["market"] not in target_markets:
+            continue
         existing = find_existing_company(conn, item)
         if existing and company_has_non_sample_data(conn, existing["id"]):
             continue
@@ -290,6 +410,7 @@ def clear_sample_tables(conn):
         "prices",
         "financial_facts",
         "filings",
+        "filing_text_blocks",
         "company_master",
     ]:
         conn.execute("DELETE FROM %s" % table)
@@ -354,12 +475,12 @@ def upsert_company(conn, item):
 
 
 def delete_company_children(conn, company_id):
-    for table in ["events", "corporate_actions", "prices", "financial_facts", "filings"]:
+    for table in ["events", "corporate_actions", "prices", "financial_facts", "filings", "filing_text_blocks"]:
         conn.execute("DELETE FROM %s WHERE company_id = ?" % table, (company_id,))
 
 
 def delete_company_sample_children(conn, company_id):
-    for table in ["events", "corporate_actions", "prices", "financial_facts", "filings"]:
+    for table in ["events", "corporate_actions", "prices", "financial_facts", "filings", "filing_text_blocks"]:
         conn.execute("DELETE FROM %s WHERE company_id = ? AND source = 'sample'" % table, (company_id,))
 
 
@@ -454,12 +575,13 @@ def insert_price_history(conn, company_id, item):
 def insert_events(conn, company_id, item):
     for event_type, title, days_ago, sentiment in item.get("events", []):
         event_date = (date.today() - timedelta(days=days_ago)).isoformat()
+        catalyst_score = EVENT_POINTS.get(event_type, 0)
         conn.execute(
             """
             INSERT INTO events (
               company_id, event_date, event_type, title, description, source,
               sentiment_score, catalyst_score
-            ) VALUES (?, ?, ?, ?, ?, 'sample', ?, NULL)
+            ) VALUES (?, ?, ?, ?, ?, 'sample', ?, ?)
             """,
             (
                 company_id,
@@ -468,6 +590,7 @@ def insert_events(conn, company_id, item):
                 title,
                 "%s のサンプルカタリストです。" % title,
                 sentiment,
+                catalyst_score,
             ),
         )
         if event_type == "dividend_increase":

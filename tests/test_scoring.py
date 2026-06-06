@@ -45,6 +45,19 @@ class ScoringWorkflowTests(unittest.TestCase):
         ]
         self.assertEqual(positive_catalyst_count(events), 1)
 
+    def test_sample_seed_can_filter_us_market(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "sample_filter.sqlite"
+            init_db(db_path)
+            conn = get_connection(db_path)
+            try:
+                inserted = seed_sample_data(conn, reset=True, market="us")
+                markets = [row["market"] for row in conn.execute("SELECT DISTINCT market FROM company_master").fetchall()]
+            finally:
+                conn.close()
+            self.assertEqual(inserted, 4)
+            self.assertEqual(markets, ["us"])
+
 
 if __name__ == "__main__":
     unittest.main()

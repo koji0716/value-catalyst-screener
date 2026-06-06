@@ -23,7 +23,7 @@ from src.db.session import get_connection
 from src.ingestion.sync_all import sync_market
 from src.ingestion.sync_state import latest_sync_states
 from src.nlp.report_generator import export_results
-from src.ui.components import disclaimer, format_jpy, format_pct, format_ratio
+from src.ui.components import disclaimer, format_money, format_pct, format_ratio
 from src.utils.file_utils import load_presets
 
 
@@ -38,7 +38,7 @@ def ensure_data():
     finally:
         conn.close()
     if count == 0:
-        sync_market(market="jp", use_sample=True)
+        sync_market(market="all", use_sample=True)
 
 
 def dataframe(results):
@@ -51,7 +51,7 @@ def dataframe(results):
                 "市場": item["market"],
                 "業種": item["industry"],
                 "株価": round(item["latest_price"], 2) if item["latest_price"] else None,
-                "時価総額": format_jpy(item["market_cap"]),
+                "時価総額": format_money(item["market_cap"], item.get("currency")),
                 "PER": round(item["per"], 2) if item["per"] else None,
                 "PBR": round(item["pbr"], 2) if item["pbr"] else None,
                 "EV/EBITDA": round(item["ev_ebitda"], 2) if item["ev_ebitda"] else None,
@@ -100,11 +100,12 @@ def first_code(value):
     return str(value).replace(" ", "").split(",")[0].strip().upper()
 
 
-def render_manual_update_panel():
+def render_manual_update_panel(market):
     st.header("データ更新")
-    codes = st.text_input("銘柄コード", value="7203")
+    default_codes = "AAPL" if market == "us" else "7203"
+    codes = st.text_input("銘柄コード / ティッカー", value=default_codes, key="update_codes_%s" % market)
     start = st.date_input("株価取得開始日", value=date.today() - timedelta(days=420))
-    update_jquants = st.button("J-Quants手動更新", type="secondary")
+    update_jquants = st.button("J-Quants手動更新", type="secondary", disabled=market == "us")
     if update_jquants:
         with st.spinner("J-Quantsから取得しています..."):
             try:
@@ -126,7 +127,7 @@ def render_manual_update_panel():
             except Exception as exc:
                 st.error(str(exc))
 
-    if st.button("EDINET DB補完更新"):
+    if st.button("EDINET DB補完更新", disabled=market == "us"):
         with st.spinner("EDINET DBから有報・年度財務を取得しています..."):
             try:
                 result = sync_market(
@@ -146,8 +147,29 @@ def render_manual_update_panel():
             except Exception as exc:
                 st.error(str(exc))
 
+    if st.button("SEC EDGAR更新", disabled=market == "jp"):
+        with st.spinner("SEC EDGARと価格APIから取得しています..."):
+            try:
+                result = sync_market(
+                    market="us",
+                    source="edgar",
+                    mode="manual",
+                    codes=codes,
+                    start_date=start.isoformat(),
+                    include_prices=True,
+                    include_financials=True,
+                    include_dividends=True,
+                    include_events=True,
+                )
+                st.success(result.get("message", "SEC EDGAR更新が完了しました。"))
+                if result.get("warnings"):
+                    st.warning(" / ".join(result["warnings"]))
+                st.json(result)
+            except Exception as exc:
+                st.error(str(exc))
+
     if st.button("サンプルデータ更新"):
-        result = sync_market(market="jp", source="sample", mode="manual")
+        result = sync_market(market=market, source="sample", mode="manual")
         st.success(result.get("message", "サンプルデータを更新しました。"))
     return first_code(codes)
 
@@ -269,7 +291,7 @@ def main():
             value=float(presets[preset].get("filters", {}).get("min_equity_ratio", 30)),
         )
         run = st.button("スクリーニング実行", type="primary")
-        detail_hint = render_manual_update_panel()
+        detail_hint = render_manual_update_panel(market)
 
     with st.expander("更新状態", expanded=False):
         states = sync_states_dataframe()
