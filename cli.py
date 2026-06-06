@@ -9,6 +9,8 @@ from src.analysis.backtest import run_simple_backtest
 from src.analysis.scoring import explain_ticker, screen_companies
 from src.db.migrations import init_db
 from src.db.session import get_connection
+from src.ingestion.coverage import data_coverage_rows
+from src.ingestion.refresh import DEFAULT_JP_SECTIONS, DEFAULT_US_EXCHANGES, refresh_until_current
 from src.ingestion.sync_all import sync_edgar_bulk_source, sync_jp_bulk_source, sync_market
 from src.nlp.report_generator import export_results
 from src.providers.edgar_client import EdgarError
@@ -26,6 +28,18 @@ def format_number(value):
     if isinstance(value, float):
         return "%.2f" % value
     return str(value)
+
+
+def format_percent(value):
+    if value is None:
+        return "N/A"
+    return "%.1f%%" % value
+
+
+def format_progress(done, total, pct_value):
+    if not total:
+        return "N/A"
+    return "%s/%s (%s)" % (int(done or 0), int(total), format_percent(pct_value))
 
 
 def add_common_screen_args(parser):
@@ -179,6 +193,78 @@ def command_backtest(args):
         for item in result["holdings"]
     ]
     print(json.dumps(printable, ensure_ascii=False, indent=2))
+    print(DISCLAIMER)
+
+
+def command_coverage(args):
+    init_db()
+    conn = get_connection()
+    try:
+        rows = data_coverage_rows(conn)
+    finally:
+        conn.close()
+
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return
+
+    print(
+        "market | master_offset | db_companies | detail_offset | major_data | price | financial | filings | actions | major_freshness | price_fresh | financial_fresh"
+    )
+    for row in rows:
+        print(
+            "%s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s"
+            % (
+                row["market"],
+                format_progress(row["master_next_offset"], row["universe_records"], row["master_progress_pct"]),
+                format_progress(row["company_count"], row["universe_records"], row["master_coverage_pct"]),
+                format_progress(row["detail_next_offset"], row["universe_records"], row["detail_progress_pct"]),
+                format_percent(row["major_data_coverage_pct"]),
+                format_progress(row["price_company_count"], row["company_count"], row["price_coverage_pct"]),
+                format_progress(
+                    row["financial_company_count"],
+                    row["company_count"],
+                    row["financial_coverage_pct"],
+                ),
+                format_progress(row["filing_company_count"], row["company_count"], row["filing_coverage_pct"]),
+                format_progress(row["action_company_count"], row["company_count"], row["action_coverage_pct"]),
+                format_percent(row["major_freshness_pct"]),
+                format_progress(
+                    row["fresh_price_company_count"],
+                    row["company_count"],
+                    row["price_freshness_pct"],
+                ),
+                format_progress(
+                    row["fresh_financial_company_count"],
+                    row["company_count"],
+                    row["financial_freshness_pct"],
+                ),
+            )
+        )
+    print("freshness assumptions: prices within 10 days, financial period_end within 18 months.")
+
+
+def command_refresh(args):
+    init_db()
+    result = refresh_until_current(
+        market=args.market,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        batch_limit=args.limit,
+        max_batches=args.max_batches,
+        sleep_sec=args.sleep_sec,
+        jp_sections=args.section,
+        us_exchanges=args.exchange,
+        include_prices=not args.no_prices,
+        include_financials=not args.no_financials,
+        include_dividends=not args.no_dividends,
+        include_events=not args.no_events,
+        include_filings=not args.no_filings,
+        resume=not args.no_resume,
+        ensure_master=not args.no_master,
+        target_detail_progress_pct=args.target_detail_progress,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     print(DISCLAIMER)
 
 
@@ -342,6 +428,29 @@ def build_parser():
     backtest.add_argument("--holding-months", type=int, default=6)
     backtest.add_argument("--top-n", type=int, default=20)
     backtest.set_defaults(func=command_backtest)
+
+    coverage = sub.add_parser("coverage")
+    coverage.add_argument("--json", action="store_true", help="Output raw coverage rows as JSON.")
+    coverage.set_defaults(func=command_coverage)
+
+    refresh = sub.add_parser("refresh")
+    refresh.add_argument("--market", default="all", choices=["jp", "us", "all"])
+    refresh.add_argument("--from", dest="start_date")
+    refresh.add_argument("--to", dest="end_date")
+    refresh.add_argument("--limit", type=int, default=10, help="Records per refresh batch.")
+    refresh.add_argument("--max-batches", type=int, default=10, help="Maximum batches to run before yielding.")
+    refresh.add_argument("--sleep-sec", type=float, default=0, help="Sleep seconds between batches.")
+    refresh.add_argument("--section", default=DEFAULT_JP_SECTIONS, help="Japanese market sections for J-Quants.")
+    refresh.add_argument("--exchange", default=DEFAULT_US_EXCHANGES, help="US exchanges for SEC EDGAR.")
+    refresh.add_argument("--target-detail-progress", type=float, default=100.0)
+    refresh.add_argument("--no-master", action="store_true", help="Do not fill missing company master records first.")
+    refresh.add_argument("--no-prices", action="store_true", help="Skip stock price synchronization.")
+    refresh.add_argument("--no-financials", action="store_true", help="Skip financial statement synchronization.")
+    refresh.add_argument("--no-dividends", action="store_true", help="Skip dividend/corporate action synchronization.")
+    refresh.add_argument("--no-events", action="store_true", help="Skip Japanese catalyst/event synchronization.")
+    refresh.add_argument("--no-filings", action="store_true", help="Skip SEC filing synchronization.")
+    refresh.add_argument("--no-resume", action="store_true", help="Reprocess records even when requested data already exists.")
+    refresh.set_defaults(func=command_refresh)
 
     watchlist = sub.add_parser("watchlist")
     watch_sub = watchlist.add_subparsers(dest="watch_action", required=True)
