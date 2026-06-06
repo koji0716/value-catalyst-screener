@@ -8,6 +8,10 @@ import httpx
 from src.utils.file_utils import load_env
 
 
+_GLOBAL_RESPONSE_CACHE = {}
+_CACHEABLE_PATHS = {"/equities/master", "/fins/summary", "/equities/earnings-calendar"}
+
+
 class JQuantsError(RuntimeError):
     pass
 
@@ -62,6 +66,26 @@ def first_value(record, *keys):
     return None
 
 
+def env_float(name, default):
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def env_int(name, default):
+    value = os.environ.get(name)
+    if value in (None, ""):
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 class JQuantsClient:
     BASE_URL = "https://api.jquants.com/v2"
 
@@ -74,6 +98,9 @@ class JQuantsClient:
         base_url=None,
         timeout=30.0,
         sleep_seconds=0.2,
+        request_sleep_seconds=None,
+        rate_limit_retry_seconds=None,
+        max_retries=None,
     ):
         load_env()
         self.email = email or os.environ.get("JQUANTS_EMAIL")
@@ -90,6 +117,18 @@ class JQuantsClient:
         self.id_token = id_token or os.environ.get("JQUANTS_ID_TOKEN")
         self.base_url = (base_url or os.environ.get("JQUANTS_BASE_URL") or self.BASE_URL).rstrip("/")
         self.sleep_seconds = sleep_seconds
+        self.request_sleep_seconds = (
+            request_sleep_seconds
+            if request_sleep_seconds is not None
+            else env_float("JQUANTS_REQUEST_SLEEP_SECONDS", 0.0)
+        )
+        self.rate_limit_retry_seconds = (
+            rate_limit_retry_seconds
+            if rate_limit_retry_seconds is not None
+            else env_float("JQUANTS_RATE_LIMIT_RETRY_SECONDS", 60.0)
+        )
+        self.max_retries = max_retries if max_retries is not None else env_int("JQUANTS_MAX_RETRIES", 3)
+        self._response_cache = _GLOBAL_RESPONSE_CACHE
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout)
 
     def close(self):
@@ -112,7 +151,8 @@ class JQuantsClient:
         if not self.refresh_token:
             raise JQuantsAuthError("J-Quants refresh token is not configured.")
 
-        response = self._client.post(
+        response = self._request(
+            "post",
             "/token/auth_refresh",
             params={"refreshtoken": self.refresh_token},
         )
@@ -126,7 +166,8 @@ class JQuantsClient:
     def fetch_refresh_token(self):
         if not (self.email and self.password):
             return None
-        response = self._client.post(
+        response = self._request(
+            "post",
             "/token/auth_user",
             content=json.dumps({"mailaddress": self.email, "password": self.password}),
             headers={"Content-Type": "application/json"},
@@ -183,14 +224,39 @@ class JQuantsClient:
         token = self.authenticate()
         return {"Authorization": "Bearer %s" % token}
 
+    def _retry_delay(self, response):
+        retry_after = response.headers.get("Retry-After")
+        if retry_after:
+            try:
+                return max(float(retry_after), 0.0)
+            except ValueError:
+                pass
+        return max(float(self.rate_limit_retry_seconds or 0.0), 0.0)
+
+    def _request(self, method, path, **kwargs):
+        attempt = 0
+        while True:
+            if self.request_sleep_seconds:
+                time.sleep(float(self.request_sleep_seconds))
+            response = getattr(self._client, method)(path, **kwargs)
+            if response.status_code != 429 or attempt >= int(self.max_retries or 0):
+                return response
+            time.sleep(self._retry_delay(response))
+            attempt += 1
+
     def _get_paginated(self, path, result_key, params):
+        cache_key = (path, tuple(sorted((key, str(value)) for key, value in params.items() if value not in (None, ""))))
+        use_cache = path in _CACHEABLE_PATHS
+        if use_cache and cache_key in self._response_cache:
+            return list(self._response_cache[cache_key])
+
         records = []
         query = {key: value for key, value in params.items() if value not in (None, "")}
         while True:
-            response = self._client.get(path, params=query, headers=self._headers())
+            response = self._request("get", path, params=query, headers=self._headers())
             if response.status_code == 401 and not self.api_key:
                 self.authenticate(force=True)
-                response = self._client.get(path, params=query, headers=self._headers())
+                response = self._request("get", path, params=query, headers=self._headers())
             payload = self._json_or_error(response)
             records.extend(payload.get(result_key, []) or [])
             pagination_key = payload.get("pagination_key")
@@ -199,6 +265,8 @@ class JQuantsClient:
             query["pagination_key"] = pagination_key
             if self.sleep_seconds:
                 time.sleep(self.sleep_seconds)
+        if use_cache:
+            self._response_cache[cache_key] = list(records)
         return records
 
     def _json_or_error(self, response):
