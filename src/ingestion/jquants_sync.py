@@ -237,13 +237,25 @@ def sync_jquants_prices_by_date(conn, client, date_value, codes=None):
     return count
 
 
-def sync_jquants_prices_by_date_range(conn, client, start_date, end_date=None, codes=None):
+def sync_jquants_prices_by_date_range(conn, client, start_date, end_date=None, codes=None, progress_callback=None):
     total = 0
     processed_dates = []
-    for date_value in iter_dates(start_date, end_date):
+    date_values = list(iter_dates(start_date, end_date))
+    for index, date_value in enumerate(date_values, start=1):
         inserted = sync_jquants_prices_by_date(conn, client, date_value, codes=codes)
         total += inserted
         processed_dates.append(date_value)
+        if progress_callback:
+            progress_callback(
+                {
+                    "phase": "prices",
+                    "current_date": date_value,
+                    "processed_dates": index,
+                    "total_dates": len(date_values),
+                    "inserted": inserted,
+                    "inserted_total": total,
+                }
+            )
     return total, processed_dates
 
 
@@ -436,11 +448,20 @@ def sync_jquants_financials_by_date(conn, client, date_value, codes=None, includ
     return inserted_financials, inserted_dividends
 
 
-def sync_jquants_financials_by_date_range(conn, client, start_date, end_date=None, codes=None, include_dividends=False):
+def sync_jquants_financials_by_date_range(
+    conn,
+    client,
+    start_date,
+    end_date=None,
+    codes=None,
+    include_dividends=False,
+    progress_callback=None,
+):
     total_financials = 0
     total_dividends = 0
     processed_dates = []
-    for date_value in iter_dates(start_date, end_date):
+    date_values = list(iter_dates(start_date, end_date))
+    for index, date_value in enumerate(date_values, start=1):
         inserted_financials, inserted_dividends = sync_jquants_financials_by_date(
             conn,
             client,
@@ -451,6 +472,19 @@ def sync_jquants_financials_by_date_range(conn, client, start_date, end_date=Non
         total_financials += inserted_financials
         total_dividends += inserted_dividends
         processed_dates.append(date_value)
+        if progress_callback:
+            progress_callback(
+                {
+                    "phase": "financials",
+                    "current_date": date_value,
+                    "processed_dates": index,
+                    "total_dates": len(date_values),
+                    "inserted": inserted_financials,
+                    "inserted_total": total_financials,
+                    "inserted_dividends": inserted_dividends,
+                    "inserted_dividends_total": total_dividends,
+                }
+            )
     return total_financials, total_dividends, processed_dates
 
 

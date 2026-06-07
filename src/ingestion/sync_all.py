@@ -509,6 +509,7 @@ def sync_jp_screening_source(
     include_financials=True,
     include_dividends=False,
     record_state=True,
+    progress_callback=None,
 ):
     params = {
         "market": "jp",
@@ -531,6 +532,7 @@ def sync_jp_screening_source(
             state_conn.close()
 
     conn = None
+    latest_progress = {}
     try:
         client = JQuantsClient()
         if not client.is_configured():
@@ -540,11 +542,57 @@ def sync_jp_screening_source(
         with client:
             target_codes = None
             if sections and str(sections).lower() != "all":
-                records, _ = filtered_jp_records(client.fetch_listed_info(), sections=sections)
+                records, _ = filtered_jp_records(client.fetch_listed_info(date_value=end_date), sections=sections)
                 target_codes = [record_code(record) for record in records if record_code(record)]
-                inserted_companies = sync_jquants_companies(conn, client, codes=target_codes)
+                inserted_companies = sync_jquants_companies(conn, client, listed_date=end_date, codes=target_codes)
             else:
-                inserted_companies = sync_jquants_companies(conn, client)
+                inserted_companies = sync_jquants_companies(conn, client, listed_date=end_date)
+
+            def record_progress(payload):
+                nonlocal latest_progress
+                phase = payload.get("phase")
+                phase_label = "株価" if phase == "prices" else "財務"
+                latest_progress = {
+                    "market": "jp",
+                    "source": "jquants",
+                    "mode": "screening",
+                    "from": start_date,
+                    "to": end_date,
+                    "phase": phase,
+                    "phase_label": phase_label,
+                    "current_date": payload.get("current_date"),
+                    "processed_dates": payload.get("processed_dates"),
+                    "total_dates": payload.get("total_dates"),
+                    "inserted": payload.get("inserted"),
+                    "inserted_total": payload.get("inserted_total"),
+                    "inserted_dividends": payload.get("inserted_dividends"),
+                    "inserted_dividends_total": payload.get("inserted_dividends_total"),
+                    "inserted_companies": inserted_companies,
+                    "message": "日本株%sデータ取得中: %s/%s日 (%s)"
+                    % (
+                        phase_label,
+                        payload.get("processed_dates"),
+                        payload.get("total_dates"),
+                        payload.get("current_date"),
+                    ),
+                }
+                if record_state:
+                    state_conn = get_connection()
+                    try:
+                        upsert_sync_state(
+                            state_conn,
+                            "jp",
+                            "jquants",
+                            "screening",
+                            "running",
+                            params,
+                            latest_progress,
+                            latest_progress["message"],
+                        )
+                    finally:
+                        state_conn.close()
+                if progress_callback:
+                    progress_callback(latest_progress)
 
             inserted_prices = 0
             price_dates = []
@@ -555,6 +603,7 @@ def sync_jp_screening_source(
                     start_date=start_date,
                     end_date=end_date,
                     codes=target_codes,
+                    progress_callback=record_progress,
                 )
 
             inserted_financials = 0
@@ -568,6 +617,7 @@ def sync_jp_screening_source(
                     end_date=end_date,
                     codes=target_codes,
                     include_dividends=include_dividends,
+                    progress_callback=record_progress,
                 )
 
         result = {
@@ -602,7 +652,7 @@ def sync_jp_screening_source(
         if record_state:
             state_conn = get_connection()
             try:
-                result = {"error": str(exc)}
+                result = {"error": str(exc), "last_progress": latest_progress}
                 finish_sync_job(state_conn, job_id, "failed", result, str(exc))
                 upsert_sync_state(state_conn, "jp", "jquants", "screening", "failed", params, result, str(exc))
             finally:

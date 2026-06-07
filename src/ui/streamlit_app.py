@@ -341,6 +341,55 @@ def sync_jobs_dataframe():
     return rows
 
 
+def active_progress_dataframe():
+    conn = get_connection()
+    try:
+        states = conn.execute(
+            """
+            SELECT *
+            FROM sync_state
+            WHERE status = 'running'
+            ORDER BY updated_at DESC
+            LIMIT 8
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    rows = []
+    for state in states:
+        result = parse_json_dict(state["result_json"])
+        done = result.get("processed_dates")
+        total = result.get("total_dates")
+        rows.append(
+            {
+                "市場": state["market"],
+                "ソース": state["source"],
+                "モード": state["mode"],
+                "フェーズ": result.get("phase_label") or result.get("phase"),
+                "現在日付": result.get("current_date"),
+                "進捗": progress_text(done, total, pct_value=(float(done) / float(total) * 100) if done and total else None),
+                "今回取得": result.get("inserted"),
+                "累計取得": result.get("inserted_total"),
+                "会社マスター": result.get("inserted_companies"),
+                "メッセージ": state["message"],
+                "更新時刻": state["updated_at"],
+            }
+        )
+    if pd:
+        return pd.DataFrame(rows)
+    return rows
+
+
+def render_active_progress():
+    progress = active_progress_dataframe()
+    if len(progress):
+        st.markdown("#### 実行中の取得")
+        st.dataframe(progress, width="stretch")
+    else:
+        st.caption("実行中の取得ジョブはありません。")
+
+
 def dataframe(results):
     rows = []
     for item in results:
@@ -418,8 +467,26 @@ def market_label(market):
     return {"jp": "日本株", "us": "米国株", "all": "日米"}.get(market, market)
 
 
-def run_update_step(market, start_date, end_date, batch_limit, max_batches, sleep_sec):
+def run_update_step(market, start_date, end_date, batch_limit, max_batches, sleep_sec, progress_callback=None):
     if market == "jp":
+        def forward_jp_progress(progress):
+            if not progress_callback:
+                return
+            done = int(progress.get("processed_dates") or 0)
+            total = int(progress.get("total_dates") or 0)
+            message = (
+                "%s: %s/%s日 (%s) / 今回取得 %s件 / 累計 %s件"
+                % (
+                    progress.get("message") or "日本株データ取得中",
+                    done,
+                    total,
+                    progress.get("current_date") or "-",
+                    progress.get("inserted") or 0,
+                    progress.get("inserted_total") or 0,
+                )
+            )
+            progress_callback(done, total, message)
+
         result = sync_jp_screening_source(
             start_date=start_date,
             end_date=end_date,
@@ -427,6 +494,7 @@ def run_update_step(market, start_date, end_date, batch_limit, max_batches, slee
             include_prices=True,
             include_financials=True,
             include_dividends=False,
+            progress_callback=forward_jp_progress,
         )
         return "success", result
 
@@ -457,7 +525,15 @@ def run_market_data_update(target, start_date, end_date, batch_limit, max_batche
         if progress_callback:
             progress_callback(index, len(markets), "%sデータを取得しています..." % market_label(market))
         try:
-            status, result = run_update_step(market, start_date, end_date, batch_limit, max_batches, sleep_sec)
+            status, result = run_update_step(
+                market,
+                start_date,
+                end_date,
+                batch_limit,
+                max_batches,
+                sleep_sec,
+                progress_callback=progress_callback,
+            )
         except Exception as exc:
             status = "failed"
             result = {"market": market, "error": str(exc)}
@@ -784,6 +860,8 @@ def render_fetch_panel():
     render_status_message(st.session_state.fetch_result)
     render_run_details(st.session_state.fetch_result)
 
+    render_active_progress()
+
     st.markdown("#### 現在の進捗")
     render_progress_summary()
 
@@ -1011,6 +1089,7 @@ def render_deep_dive_panel():
 
 def render_history_panel():
     st.subheader("取得進捗と履歴")
+    render_active_progress()
     render_progress_summary()
 
     states = sync_states_dataframe()

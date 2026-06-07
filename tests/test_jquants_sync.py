@@ -6,7 +6,9 @@ from src.ingestion.jquants_sync import (
     ensure_company_for_code,
     sync_jquants_earnings_events,
     sync_jquants_financials_by_date,
+    sync_jquants_financials_by_date_range,
     sync_jquants_prices_by_date,
+    sync_jquants_prices_by_date_range,
     sync_jquants_statement_catalysts,
     parse_code_list,
     sync_jquants_prices,
@@ -196,6 +198,23 @@ class JQuantsSyncTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual([(row["security_code"], row["close"]) for row in rows], [("7203", 2550.0), ("9432", 151.0)])
 
+    def test_price_date_range_reports_progress_per_date(self):
+        progress = []
+        count, dates = sync_jquants_prices_by_date_range(
+            self.conn,
+            FakeJQuantsClient(),
+            "2026-01-05",
+            end_date="2026-01-06",
+            progress_callback=progress.append,
+        )
+
+        self.assertEqual(dates, ["2026-01-05", "2026-01-06"])
+        self.assertEqual(len(progress), 2)
+        self.assertEqual(progress[-1]["phase"], "prices")
+        self.assertEqual(progress[-1]["processed_dates"], 2)
+        self.assertEqual(progress[-1]["total_dates"], 2)
+        self.assertEqual(progress[-1]["inserted_total"], count)
+
     def test_sync_financials_by_date_imports_all_disclosures(self):
         financials, dividends = sync_jquants_financials_by_date(
             self.conn,
@@ -213,6 +232,25 @@ class JQuantsSyncTests(unittest.TestCase):
             """
         ).fetchone()
         self.assertEqual(row["security_code"], "7203")
+
+    def test_financial_date_range_reports_progress_per_date(self):
+        progress = []
+        financials, dividends, dates = sync_jquants_financials_by_date_range(
+            self.conn,
+            FakeJQuantsClient(),
+            "2026-01-31",
+            end_date="2026-02-01",
+            include_dividends=True,
+            progress_callback=progress.append,
+        )
+
+        self.assertEqual(dates, ["2026-01-31", "2026-02-01"])
+        self.assertEqual(len(progress), 2)
+        self.assertEqual(progress[-1]["phase"], "financials")
+        self.assertEqual(progress[-1]["processed_dates"], 2)
+        self.assertEqual(progress[-1]["total_dates"], 2)
+        self.assertEqual(progress[-1]["inserted_total"], financials)
+        self.assertEqual(progress[-1]["inserted_dividends_total"], dividends)
 
     def test_earnings_events_are_filtered_by_code(self):
         ensure_company_for_code(self.conn, "7203")
