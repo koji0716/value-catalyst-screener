@@ -37,6 +37,18 @@ class ScoringWorkflowTests(unittest.TestCase):
         self.assertGreater(len(results), 0)
         self.assertIn("total_score", results[0])
 
+    def test_screening_can_replace_preset_filters_with_manual_conditions(self):
+        results, run_id = screen_companies(
+            "deep_value",
+            market="jp",
+            overrides={"max_per": 20},
+            db_path=self.db_path,
+            save=False,
+            replace_filters=True,
+        )
+        self.assertIsNone(run_id)
+        self.assertTrue(all(item["per"] is None or item["per"] <= 20 for item in results))
+
     def test_positive_catalyst_count_excludes_risk_events(self):
         events = [
             {"event_type": "earnings_revision_up", "catalyst_score": 25},
@@ -57,6 +69,58 @@ class ScoringWorkflowTests(unittest.TestCase):
                 conn.close()
             self.assertEqual(inserted, 4)
             self.assertEqual(markets, ["us"])
+
+    def test_missing_latest_revenue_does_not_crash_screening(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "missing_revenue.sqlite"
+            init_db(db_path)
+            conn = get_connection(db_path)
+            try:
+                seed_sample_data(conn, reset=True, market="jp")
+                latest = conn.execute(
+                    """
+                    SELECT ff.id
+                    FROM financial_facts ff
+                    JOIN company_master cm ON cm.id = ff.company_id
+                    WHERE cm.market = 'jp'
+                    ORDER BY ff.period_end DESC, ff.fiscal_year DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                conn.execute("UPDATE financial_facts SET revenue = NULL WHERE id = ?", (latest["id"],))
+                conn.commit()
+            finally:
+                conn.close()
+
+            results, run_id = screen_companies("balanced", market="jp", db_path=db_path, save=False)
+            self.assertIsNone(run_id)
+            self.assertIsInstance(results, list)
+
+    def test_missing_latest_price_does_not_crash_screening(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "missing_price.sqlite"
+            init_db(db_path)
+            conn = get_connection(db_path)
+            try:
+                seed_sample_data(conn, reset=True, market="jp")
+                latest = conn.execute(
+                    """
+                    SELECT p.id
+                    FROM prices p
+                    JOIN company_master cm ON cm.id = p.company_id
+                    WHERE cm.market = 'jp'
+                    ORDER BY p.trade_date DESC
+                    LIMIT 1
+                    """
+                ).fetchone()
+                conn.execute("UPDATE prices SET close = NULL, adjusted_close = NULL WHERE id = ?", (latest["id"],))
+                conn.commit()
+            finally:
+                conn.close()
+
+            results, run_id = screen_companies("balanced", market="jp", db_path=db_path, save=False)
+            self.assertIsNone(run_id)
+            self.assertIsInstance(results, list)
 
 
 if __name__ == "__main__":

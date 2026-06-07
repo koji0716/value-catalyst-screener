@@ -99,6 +99,49 @@ def find_company(conn, ticker=None, cik=None):
     return None
 
 
+def unavailable_identifier(ticker=None, cik=None):
+    if cik not in (None, ""):
+        return str(cik)
+    return str(ticker or "").upper()
+
+
+def is_unavailable(conn, market, source, data_type, identifier):
+    if not identifier:
+        return False
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM unavailable_data
+        WHERE market = ? AND source = ? AND data_type = ? AND identifier = ?
+        LIMIT 1
+        """,
+        (market, source, data_type, str(identifier)),
+    ).fetchone()
+    return bool(row)
+
+
+def mark_unavailable(conn, market, source, data_type, identifier, reason):
+    if not identifier:
+        return
+    conn.execute(
+        """
+        INSERT INTO unavailable_data (
+          market, source, data_type, identifier, reason, attempts, first_seen_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(market, source, data_type, identifier) DO UPDATE SET
+          reason = excluded.reason,
+          attempts = unavailable_data.attempts + 1,
+          last_seen_at = CURRENT_TIMESTAMP
+        """,
+        (market, source, data_type, str(identifier), str(reason)[:500]),
+    )
+
+
+def is_permanent_edgar_unavailable(exc):
+    text = str(exc).lower()
+    return "404" in text or "nosuchkey" in text or "not found" in text
+
+
 def upsert_company(conn, ticker, record):
     cik = str(record.get("cik") or record.get("cik_str") or "").strip()
     company_name = record.get("name") or record.get("title") or ticker
@@ -356,11 +399,16 @@ def company_has_requested_edgar_data(
         checks.append(("corporate_actions", "source = 'yfinance' AND action_type = 'dividend'"))
     if not checks:
         return True
+    company = conn.execute("SELECT ticker, cik FROM company_master WHERE id = ?", (company_id,)).fetchone()
     for table, condition in checks:
         row = conn.execute(
             "SELECT 1 FROM %s WHERE company_id = ? AND %s LIMIT 1" % (table, condition),
             (company_id,),
         ).fetchone()
+        if not row and table == "financial_facts" and company:
+            identifier = unavailable_identifier(company["ticker"], company["cik"])
+            if is_unavailable(conn, "us", "edgar", "financials", identifier):
+                continue
         if not row:
             return False
     return True
@@ -383,6 +431,8 @@ def sync_edgar_record(
     include_filings=True,
     include_dividends=True,
     filing_forms=DEFAULT_FILING_FORMS,
+    price_rows=None,
+    skip_unavailable=True,
 ):
     warnings = []
     existing = find_company(conn, ticker=ticker, cik=record.get("cik") or record.get("cik_str"))
@@ -393,16 +443,23 @@ def sync_edgar_record(
     inserted_prices = 0
     inserted_filings = 0
     inserted_actions = 0
+    skipped_unavailable = 0
     cik = record.get("cik") or record.get("cik_str")
 
     if include_financials:
-        try:
-            facts = edgar_client.fetch_companyfacts(cik)
-            for financial in map_companyfacts(facts):
-                if upsert_financial(conn, company_id, financial):
-                    inserted_financials += 1
-        except EdgarError as exc:
-            warnings.append("%s financials: %s" % (ticker, exc))
+        identifier = unavailable_identifier(ticker, cik)
+        if skip_unavailable and is_unavailable(conn, "us", "edgar", "financials", identifier):
+            skipped_unavailable += 1
+        else:
+            try:
+                facts = edgar_client.fetch_companyfacts(cik)
+                for financial in map_companyfacts(facts):
+                    if upsert_financial(conn, company_id, financial):
+                        inserted_financials += 1
+            except EdgarError as exc:
+                warnings.append("%s financials: %s" % (ticker, exc))
+                if skip_unavailable and is_permanent_edgar_unavailable(exc):
+                    mark_unavailable(conn, "us", "edgar", "financials", identifier, exc)
 
     if include_filings:
         try:
@@ -422,11 +479,14 @@ def sync_edgar_record(
 
     if include_prices:
         try:
-            prices = price_client.fetch_ohlc(
-                yfinance_symbol(ticker),
-                start_date=start_date or (date.today() - timedelta(days=420)).isoformat(),
-                end_date=end_date,
-            )
+            if price_rows is None:
+                prices = price_client.fetch_ohlc(
+                    yfinance_symbol(ticker),
+                    start_date=start_date or (date.today() - timedelta(days=420)).isoformat(),
+                    end_date=end_date,
+                )
+            else:
+                prices = price_rows
             for price in prices:
                 if upsert_price(conn, company_id, price):
                     inserted_prices += 1
@@ -471,6 +531,7 @@ def sync_edgar_record(
         "inserted_prices": inserted_prices,
         "inserted_filings": inserted_filings,
         "inserted_actions": inserted_actions,
+        "skipped_unavailable": skipped_unavailable,
         "warnings": warnings,
     }
 
@@ -508,6 +569,7 @@ def sync_edgar_market(
         "inserted_prices": 0,
         "inserted_filings": 0,
         "inserted_actions": 0,
+        "skipped_unavailable": 0,
         "warnings": [],
     }
     try:
@@ -530,7 +592,7 @@ def sync_edgar_market(
                 include_filings=include_filings,
                 include_dividends=include_dividends,
             )
-            for key in ["inserted_financials", "inserted_prices", "inserted_filings", "inserted_actions"]:
+            for key in ["inserted_financials", "inserted_prices", "inserted_filings", "inserted_actions", "skipped_unavailable"]:
                 result[key] += item[key]
             result["updated_companies"] += item["inserted_companies"] + item["updated_companies"]
             result["warnings"].extend(item["warnings"])
@@ -578,6 +640,7 @@ def sync_edgar_bulk_market(
         "inserted_prices": 0,
         "inserted_filings": 0,
         "inserted_actions": 0,
+        "skipped_unavailable": 0,
         "warnings": [],
     }
     try:
@@ -590,6 +653,19 @@ def sync_edgar_bulk_market(
         result["available_records"] = available
         result["selected_records"] = len(records)
         result["next_offset"] = int(offset or 0) + len(records)
+        price_rows_by_ticker = {}
+        if include_prices and hasattr(price_client, "fetch_ohlc_batch"):
+            tickers = [str(record.get("ticker") or "").upper() for record in records if record.get("ticker")]
+            symbols = [yfinance_symbol(ticker) for ticker in tickers]
+            rows_by_symbol = price_client.fetch_ohlc_batch(
+                symbols,
+                start_date=start_date or (date.today() - timedelta(days=420)).isoformat(),
+                end_date=end_date,
+            )
+            price_rows_by_ticker = {
+                ticker: rows_by_symbol.get(yfinance_symbol(ticker), [])
+                for ticker in tickers
+            }
         for record in records:
             ticker = str(record.get("ticker") or "").upper()
             existing = find_company(conn, ticker=ticker, cik=record.get("cik") or record.get("cik_str"))
@@ -615,6 +691,7 @@ def sync_edgar_bulk_market(
                 include_financials=include_financials,
                 include_filings=include_filings,
                 include_dividends=include_dividends,
+                price_rows=price_rows_by_ticker.get(ticker) if price_rows_by_ticker else None,
             )
             result["processed_tickers"].append(ticker)
             for key in [
@@ -624,6 +701,7 @@ def sync_edgar_bulk_market(
                 "inserted_prices",
                 "inserted_filings",
                 "inserted_actions",
+                "skipped_unavailable",
             ]:
                 result[key] += item[key]
             result["warnings"].extend(item["warnings"])

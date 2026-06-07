@@ -152,6 +152,58 @@ def ensure_company_for_code(conn, code):
     return cur.lastrowid
 
 
+def iso_date(value):
+    if not value:
+        return None
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+def iter_dates(start_date, end_date=None):
+    current = iso_date(start_date)
+    if current is None:
+        return
+    last = iso_date(end_date) or date.today()
+    while current <= last:
+        yield current.isoformat()
+        current += timedelta(days=1)
+
+
+def price_record_code(record):
+    return normalize_issue_code(first_value(record, "Code", "LocalCode"))
+
+
+def upsert_price_from_jquants(conn, company_id, record):
+    trade_date = jquants_date(first_value(record, "Date"))
+    if not trade_date:
+        return False
+    close = to_float(first_value(record, "Close", "C"))
+    if close is None:
+        return False
+    adjusted_close = to_float(first_value(record, "AdjustmentClose", "AdjC")) or close
+    conn.execute("DELETE FROM prices WHERE company_id = ? AND trade_date = ?", (company_id, trade_date))
+    conn.execute(
+        """
+        INSERT INTO prices (
+          company_id, trade_date, open, high, low, close, adjusted_close,
+          volume, market_cap, source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'jquants')
+        """,
+        (
+            company_id,
+            trade_date,
+            to_float(first_value(record, "Open", "O")),
+            to_float(first_value(record, "High", "H")),
+            to_float(first_value(record, "Low", "L")),
+            close,
+            adjusted_close,
+            to_float(first_value(record, "AdjustmentVolume", "AdjVo", "Volume", "Vo")),
+        ),
+    )
+    return True
+
+
 def sync_jquants_prices(conn, client, codes, start_date=None, end_date=None):
     count = 0
     for code in parse_code_list(codes):
@@ -160,33 +212,39 @@ def sync_jquants_prices(conn, client, codes, start_date=None, end_date=None):
         if records:
             delete_sample_rows(conn, company_id, ["prices"])
         for record in records:
-            trade_date = jquants_date(first_value(record, "Date"))
-            if not trade_date:
-                continue
-            close = to_float(first_value(record, "Close", "C"))
-            adjusted_close = to_float(first_value(record, "AdjustmentClose", "AdjC")) or close
-            conn.execute("DELETE FROM prices WHERE company_id = ? AND trade_date = ?", (company_id, trade_date))
-            conn.execute(
-                """
-                INSERT INTO prices (
-                  company_id, trade_date, open, high, low, close, adjusted_close,
-                  volume, market_cap, source
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 'jquants')
-                """,
-                (
-                    company_id,
-                    trade_date,
-                    to_float(first_value(record, "Open", "O")),
-                    to_float(first_value(record, "High", "H")),
-                    to_float(first_value(record, "Low", "L")),
-                    close,
-                    adjusted_close,
-                    to_float(first_value(record, "AdjustmentVolume", "AdjVo", "Volume", "Vo")),
-                ),
-            )
+            if upsert_price_from_jquants(conn, company_id, record):
+                count += 1
+    conn.commit()
+    return count
+
+
+def sync_jquants_prices_by_date(conn, client, date_value, codes=None):
+    target_codes = set(parse_code_list(codes))
+    count = 0
+    records = client.fetch_prices(date_value=date_value)
+    touched_companies = set()
+    for record in records:
+        code = price_record_code(record)
+        if not code or (target_codes and code not in target_codes):
+            continue
+        company_id = ensure_company_for_code(conn, code)
+        if company_id not in touched_companies:
+            delete_sample_rows(conn, company_id, ["prices"])
+            touched_companies.add(company_id)
+        if upsert_price_from_jquants(conn, company_id, record):
             count += 1
     conn.commit()
     return count
+
+
+def sync_jquants_prices_by_date_range(conn, client, start_date, end_date=None, codes=None):
+    total = 0
+    processed_dates = []
+    for date_value in iter_dates(start_date, end_date):
+        inserted = sync_jquants_prices_by_date(conn, client, date_value, codes=codes)
+        total += inserted
+        processed_dates.append(date_value)
+    return total, processed_dates
 
 
 def statement_period_type(record):
@@ -347,6 +405,53 @@ def sync_jquants_financials(conn, client, codes):
                 count += 1
     conn.commit()
     return count
+
+
+def sync_jquants_financials_by_date(conn, client, date_value, codes=None, include_dividends=False):
+    target_codes = set(parse_code_list(codes))
+    records = client.fetch_financial_statements(date_value=date_value)
+    inserted_financials = 0
+    inserted_dividends = 0
+    touched_financials = set()
+    touched_actions = set()
+    for record in records:
+        code = normalize_issue_code(first_value(record, "Code", "LocalCode"))
+        if not code:
+            continue
+        if target_codes and code not in target_codes:
+            continue
+        company_id = ensure_company_for_code(conn, code)
+        if company_id not in touched_financials:
+            delete_sample_rows(conn, company_id, ["financial_facts"])
+            touched_financials.add(company_id)
+        if upsert_statement(conn, company_id, record):
+            inserted_financials += 1
+        if include_dividends:
+            if company_id not in touched_actions:
+                delete_sample_rows(conn, company_id, ["corporate_actions"])
+                touched_actions.add(company_id)
+            if upsert_dividend_from_summary(conn, company_id, record):
+                inserted_dividends += 1
+    conn.commit()
+    return inserted_financials, inserted_dividends
+
+
+def sync_jquants_financials_by_date_range(conn, client, start_date, end_date=None, codes=None, include_dividends=False):
+    total_financials = 0
+    total_dividends = 0
+    processed_dates = []
+    for date_value in iter_dates(start_date, end_date):
+        inserted_financials, inserted_dividends = sync_jquants_financials_by_date(
+            conn,
+            client,
+            date_value,
+            codes=codes,
+            include_dividends=include_dividends,
+        )
+        total_financials += inserted_financials
+        total_dividends += inserted_dividends
+        processed_dates.append(date_value)
+    return total_financials, total_dividends, processed_dates
 
 
 def dividend_amount_from_summary(record):

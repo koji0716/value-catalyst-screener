@@ -3,6 +3,7 @@ import unittest
 
 from src.db.models import SCHEMA
 from src.ingestion.edgar_sync import filtered_ticker_records, map_companyfacts, sync_edgar_bulk_market, sync_edgar_market
+from src.providers.edgar_client import EdgarError
 
 
 class FakeEdgarClient:
@@ -88,8 +89,16 @@ class FakePriceClient:
             }
         ]
 
+    def fetch_ohlc_batch(self, tickers, start_date=None, end_date=None):
+        return {ticker: self.fetch_ohlc(ticker, start_date=start_date, end_date=end_date) for ticker in tickers}
+
     def fetch_dividends(self, ticker):
         return [{"date": "2026-02-14", "amount": 0.26}]
+
+
+class MissingFactsEdgarClient(FakeEdgarClient):
+    def fetch_companyfacts(self, cik):
+        raise EdgarError("SEC EDGAR request failed (404): NoSuchKey")
 
 
 class EdgarSyncTests(unittest.TestCase):
@@ -171,6 +180,42 @@ class EdgarSyncTests(unittest.TestCase):
         )
         self.assertEqual(second["skipped_existing"], 2)
         self.assertEqual(second["processed_tickers"], [])
+
+    def test_sync_edgar_bulk_market_records_permanent_missing_financials(self):
+        result = sync_edgar_bulk_market(
+            self.conn,
+            edgar_client=MissingFactsEdgarClient(),
+            price_client=FakePriceClient(),
+            exchanges="Nasdaq",
+            limit=1,
+            include_prices=False,
+            include_financials=True,
+            include_filings=False,
+            include_dividends=False,
+        )
+        self.assertEqual(result["processed_tickers"], ["AAPL"])
+        self.assertEqual(result["skipped_unavailable"], 0)
+        row = self.conn.execute(
+            """
+            SELECT market, source, data_type, identifier, attempts
+            FROM unavailable_data
+            WHERE market = 'us' AND source = 'edgar' AND data_type = 'financials'
+            """
+        ).fetchone()
+        self.assertEqual(row["identifier"], "320193")
+
+        second = sync_edgar_bulk_market(
+            self.conn,
+            edgar_client=MissingFactsEdgarClient(),
+            price_client=FakePriceClient(),
+            exchanges="Nasdaq",
+            limit=1,
+            include_prices=False,
+            include_financials=True,
+            include_filings=False,
+            include_dividends=False,
+        )
+        self.assertEqual(second["skipped_existing"], 1)
 
 
 if __name__ == "__main__":

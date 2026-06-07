@@ -5,7 +5,19 @@ from src.ui.glossary import GLOSSARY, GLOSSARY_ORDER, term_help, term_rows
 
 class GlossaryTests(unittest.TestCase):
     def test_core_terms_have_plain_explanations_and_cautions(self):
-        for term in ["PER", "PBR", "ROE", "自己資本比率", "カタリスト", "next_offset"]:
+        for term in [
+            "PER",
+            "PBR",
+            "ROE",
+            "自己資本比率",
+            "カタリスト",
+            "next_offset",
+            "Strong Candidate",
+            "Candidate",
+            "Watch",
+            "Weak",
+            "Exclude",
+        ]:
             self.assertIn(term, GLOSSARY)
             self.assertTrue(GLOSSARY[term]["plain"])
             self.assertTrue(GLOSSARY[term]["watch"])

@@ -81,6 +81,8 @@ def price_stats(conn, company_id):
         return {}
 
     latest_close = latest["adjusted_close"] or latest["close"]
+    if latest_close is None:
+        return {"latest_price": None, "latest_trade_date": latest["trade_date"]}
     p3m = price_on_or_before(conn, company_id, today - timedelta(days=90))
     p6m = price_on_or_before(conn, company_id, today - timedelta(days=180))
     p12m = price_on_or_before(conn, company_id, today - timedelta(days=365))
@@ -174,6 +176,8 @@ def build_metrics(conn, company):
     prev = previous_financial(conn, company_id, fin["id"])
     stats = price_stats(conn, company_id)
     latest_close = stats.get("latest_price")
+    if latest_close is None:
+        return None
     market_cap = price["market_cap"]
     if not market_cap and latest_close and fin["shares_outstanding"]:
         market_cap = latest_close * fin["shares_outstanding"]
@@ -189,7 +193,10 @@ def build_metrics(conn, company):
     fcf_margin = percentage(safe_div(fin["free_cash_flow"], fin["revenue"]))
     equity_ratio = percentage(safe_div(fin["total_equity"], fin["total_assets"]))
     net_debt_ebitda = safe_div(net_debt, fin["ebitda"])
-    revenue_growth = percentage(safe_div(fin["revenue"], prev["revenue"]) - 1) if prev and prev["revenue"] else None
+    revenue_growth = None
+    if prev and prev["revenue"] and fin["revenue"] is not None:
+        revenue_ratio = safe_div(fin["revenue"], prev["revenue"])
+        revenue_growth = percentage(revenue_ratio - 1) if revenue_ratio is not None else None
     events = recent_events(conn, company_id)
     filings = recent_filings(conn, company_id)
     text_blocks = recent_text_blocks(conn, company_id)
@@ -364,12 +371,20 @@ def make_reason_summary(metrics):
     return " / ".join(reasons) if reasons else "主要指標は中立的です"
 
 
-def screen_companies(preset_name="balanced", market="all", overrides=None, limit=None, db_path=None, save=True):
+def screen_companies(
+    preset_name="balanced",
+    market="all",
+    overrides=None,
+    limit=None,
+    db_path=None,
+    save=True,
+    replace_filters=False,
+):
     presets = load_presets()
     if preset_name not in presets:
         raise ValueError("Unknown preset: %s" % preset_name)
     preset = dict(presets[preset_name])
-    filters = dict(preset.get("filters", {}))
+    filters = {} if replace_filters else dict(preset.get("filters", {}))
     if overrides:
         filters.update({k: v for k, v in overrides.items() if v is not None})
     preset["filters"] = filters

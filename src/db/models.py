@@ -200,6 +200,20 @@ SCHEMA = [
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS unavailable_data (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      market TEXT NOT NULL,
+      source TEXT NOT NULL,
+      data_type TEXT NOT NULL,
+      identifier TEXT NOT NULL,
+      reason TEXT,
+      attempts INTEGER DEFAULT 1,
+      first_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(market, source, data_type, identifier)
+    )
+    """,
 ]
 
 INDEXES = [
@@ -212,4 +226,5 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_screening_run ON screening_results(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_sync_jobs_created ON sync_jobs(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_sync_state_source ON sync_state(source, market)",
+    "CREATE INDEX IF NOT EXISTS idx_unavailable_lookup ON unavailable_data(market, source, data_type, identifier)",
 ]

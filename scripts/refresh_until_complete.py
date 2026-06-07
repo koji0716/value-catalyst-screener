@@ -14,6 +14,7 @@ from src.db.migrations import init_db
 from src.db.session import get_connection
 from src.ingestion.coverage import data_coverage_rows
 from src.ingestion.refresh import refresh_until_current
+from src.ingestion.sync_all import sync_jp_screening_source
 
 
 def utc_now():
@@ -49,6 +50,12 @@ def is_complete(row, target):
         and float(row.get("master_progress_pct") or 0.0) >= 100.0
         and float(row.get("detail_progress_pct") or 0.0) >= float(target)
     )
+
+
+def is_run_complete(market, row, args, screening_done):
+    if args.profile == "screening" and market == "jp":
+        return market in screening_done
+    return is_complete(row, args.target_detail_progress)
 
 
 def parse_markets(value):
@@ -108,10 +115,11 @@ def run(args):
     init_db()
     markets = parse_markets(args.market)
     consecutive_errors = 0
+    screening_done = set()
 
     while True:
         rows = coverage(markets)
-        if all(is_complete(rows.get(market), args.target_detail_progress) for market in markets):
+        if all(is_run_complete(market, rows.get(market), args, screening_done) for market in markets):
             append_log(args.log, {"at": utc_now(), "event": "complete", "coverage": rows})
             notify_completion(args, rows)
             return 0
@@ -119,7 +127,57 @@ def run(args):
         progressed = False
         for market in markets:
             row = rows.get(market)
-            if is_complete(row, args.target_detail_progress):
+            if is_run_complete(market, row, args, screening_done):
+                continue
+
+            if args.profile == "screening" and market == "jp":
+                append_log(
+                    args.log,
+                    {
+                        "at": utc_now(),
+                        "event": "screening_start",
+                        "market": market,
+                        "coverage": row,
+                    },
+                )
+                try:
+                    result = sync_jp_screening_source(
+                        start_date=args.start_date,
+                        end_date=args.end_date,
+                        sections=args.jp_sections,
+                        include_prices=True,
+                        include_financials=True,
+                        include_dividends=False,
+                    )
+                    consecutive_errors = 0
+                    progressed = True
+                    screening_done.add(market)
+                    append_log(
+                        args.log,
+                        {
+                            "at": utc_now(),
+                            "event": "screening_finish",
+                            "market": market,
+                            "inserted_prices": result.get("inserted_prices"),
+                            "inserted_financials": result.get("inserted_financials"),
+                            "processed_price_dates": result.get("processed_price_dates"),
+                            "processed_financial_dates": result.get("processed_financial_dates"),
+                        },
+                    )
+                except Exception as exc:
+                    consecutive_errors += 1
+                    wait_seconds = min(float(args.error_sleep) * consecutive_errors, float(args.max_error_sleep))
+                    append_log(
+                        args.log,
+                        {
+                            "at": utc_now(),
+                            "event": "error",
+                            "market": market,
+                            "error": str(exc),
+                            "seconds": wait_seconds,
+                        },
+                    )
+                    time.sleep(wait_seconds)
                 continue
 
             params = {
@@ -131,6 +189,9 @@ def run(args):
                 "sleep_sec": args.batch_sleep,
                 "jp_sections": args.jp_sections,
                 "us_exchanges": args.us_exchanges,
+                "include_dividends": args.profile == "full",
+                "include_events": args.profile == "full",
+                "include_filings": args.profile == "full",
                 "target_detail_progress_pct": args.target_detail_progress,
             }
             append_log(
@@ -203,6 +264,7 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--market", default="all", choices=["jp", "us", "all"])
+    parser.add_argument("--profile", default="screening", choices=["screening", "full"])
     parser.add_argument("--from", dest="start_date", default="2025-01-01")
     parser.add_argument("--to", dest="end_date")
     parser.add_argument("--jp-sections", default="all")

@@ -186,8 +186,10 @@ class JQuantsClient:
             params["code"] = normalize_issue_code(code)
         return self._get_paginated("/equities/master", "data", params)
 
-    def fetch_prices(self, code, start_date=None, end_date=None, date_value=None):
-        params = {"code": normalize_issue_code(code)}
+    def fetch_prices(self, code=None, start_date=None, end_date=None, date_value=None):
+        params = {}
+        if code:
+            params["code"] = normalize_issue_code(code)
         if date_value:
             params["date"] = jquants_query_date(date_value)
         else:
@@ -195,6 +197,8 @@ class JQuantsClient:
                 params["from"] = jquants_query_date(start_date)
             if end_date:
                 params["to"] = jquants_query_date(end_date)
+        if not params:
+            raise ValueError("code, date_value, start_date, or end_date is required for J-Quants prices.")
         return self._get_paginated("/equities/bars/daily", "data", params)
 
     def fetch_financial_statements(self, code=None, date_value=None):

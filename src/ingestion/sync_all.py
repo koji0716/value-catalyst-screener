@@ -10,10 +10,12 @@ from src.ingestion.jquants_sync import (
     sync_jquants_dividends,
     sync_jquants_earnings_events,
     sync_jquants_financials,
+    sync_jquants_financials_by_date_range,
     sync_jquants_prices,
+    sync_jquants_prices_by_date_range,
     sync_jquants_statement_catalysts,
 )
-from src.ingestion.jp_bulk_sync import sync_jp_bulk_market
+from src.ingestion.jp_bulk_sync import filtered_jp_records, record_code, sync_jp_bulk_market
 from src.ingestion.sample_data import seed_sample_data
 from src.ingestion.sync_state import begin_sync_job, finish_sync_job, upsert_sync_state
 from src.providers.jquants_client import JQuantsClient, JQuantsError
@@ -491,6 +493,118 @@ def sync_jp_bulk_source(
                 result = {"error": str(exc)}
                 finish_sync_job(state_conn, job_id, "failed", result, str(exc))
                 upsert_sync_state(state_conn, "jp", "jquants", "bulk", "failed", params, result, str(exc))
+            finally:
+                state_conn.close()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+
+def sync_jp_screening_source(
+    start_date=None,
+    end_date=None,
+    sections=None,
+    include_prices=True,
+    include_financials=True,
+    include_dividends=False,
+    record_state=True,
+):
+    params = {
+        "market": "jp",
+        "source": "jquants",
+        "mode": "screening",
+        "start_date": start_date,
+        "end_date": end_date,
+        "sections": sections,
+        "include_prices": include_prices,
+        "include_financials": include_financials,
+        "include_dividends": include_dividends,
+    }
+    job_id = None
+    if record_state:
+        state_conn = get_connection()
+        try:
+            job_id = begin_sync_job(state_conn, "screening_sync", "jp", "jquants", "screening", params)
+            upsert_sync_state(state_conn, "jp", "jquants", "screening", "running", params, message="日本株スクリーニング同期中")
+        finally:
+            state_conn.close()
+
+    conn = None
+    try:
+        client = JQuantsClient()
+        if not client.is_configured():
+            raise JQuantsError("JQUANTS_API_KEY is not configured.")
+        start_date = start_date or default_price_start()
+        conn = get_connection()
+        with client:
+            target_codes = None
+            if sections and str(sections).lower() != "all":
+                records, _ = filtered_jp_records(client.fetch_listed_info(), sections=sections)
+                target_codes = [record_code(record) for record in records if record_code(record)]
+                inserted_companies = sync_jquants_companies(conn, client, codes=target_codes)
+            else:
+                inserted_companies = sync_jquants_companies(conn, client)
+
+            inserted_prices = 0
+            price_dates = []
+            if include_prices:
+                inserted_prices, price_dates = sync_jquants_prices_by_date_range(
+                    conn,
+                    client,
+                    start_date=start_date,
+                    end_date=end_date,
+                    codes=target_codes,
+                )
+
+            inserted_financials = 0
+            inserted_dividends = 0
+            financial_dates = []
+            if include_financials:
+                inserted_financials, inserted_dividends, financial_dates = sync_jquants_financials_by_date_range(
+                    conn,
+                    client,
+                    start_date=start_date,
+                    end_date=end_date,
+                    codes=target_codes,
+                    include_dividends=include_dividends,
+                )
+
+        result = {
+            "market": "jp",
+            "source": "jquants",
+            "mode": "screening",
+            "from": start_date,
+            "to": end_date,
+            "target_codes": target_codes,
+            "inserted_companies": inserted_companies,
+            "inserted_prices": inserted_prices,
+            "inserted_financials": inserted_financials,
+            "inserted_dividends": inserted_dividends,
+            "processed_price_dates": len(price_dates),
+            "processed_financial_dates": len(financial_dates),
+            "first_price_date": price_dates[0] if price_dates else None,
+            "last_price_date": price_dates[-1] if price_dates else None,
+            "first_financial_date": financial_dates[0] if financial_dates else None,
+            "last_financial_date": financial_dates[-1] if financial_dates else None,
+            "warnings": [],
+            "message": "J-Quantsから日本株スクリーニング用データを日付単位で同期しました。",
+        }
+        if record_state:
+            state_conn = get_connection()
+            try:
+                finish_sync_job(state_conn, job_id, "success", result, result.get("message"))
+                upsert_sync_state(state_conn, "jp", "jquants", "screening", "success", params, result, result.get("message"))
+            finally:
+                state_conn.close()
+        return result
+    except Exception as exc:
+        if record_state:
+            state_conn = get_connection()
+            try:
+                result = {"error": str(exc)}
+                finish_sync_job(state_conn, job_id, "failed", result, str(exc))
+                upsert_sync_state(state_conn, "jp", "jquants", "screening", "failed", params, result, str(exc))
             finally:
                 state_conn.close()
         raise

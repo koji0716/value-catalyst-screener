@@ -5,6 +5,8 @@ from src.db.models import SCHEMA
 from src.ingestion.jquants_sync import (
     ensure_company_for_code,
     sync_jquants_earnings_events,
+    sync_jquants_financials_by_date,
+    sync_jquants_prices_by_date,
     sync_jquants_statement_catalysts,
     parse_code_list,
     sync_jquants_prices,
@@ -16,7 +18,30 @@ from src.providers.jquants_client import normalize_issue_code, to_float
 
 
 class FakeJQuantsClient:
-    def fetch_prices(self, code, start_date=None, end_date=None):
+    def fetch_prices(self, code=None, start_date=None, end_date=None, date_value=None):
+        if date_value:
+            return [
+                {
+                    "Date": "20260105",
+                    "Code": "72030",
+                    "O": "2500",
+                    "H": "2600",
+                    "L": "2490",
+                    "C": "2550",
+                    "AdjC": "2550",
+                    "AdjVo": "1000000",
+                },
+                {
+                    "Date": "20260105",
+                    "Code": "94320",
+                    "O": "150",
+                    "H": "152",
+                    "L": "149",
+                    "C": "151",
+                    "AdjC": "151",
+                    "AdjVo": "2000000",
+                },
+            ]
         return [
             {
                 "Date": "20260105",
@@ -37,6 +62,22 @@ class FakeJQuantsClient:
         ]
 
     def fetch_financial_statements(self, code=None, date_value=None):
+        if date_value:
+            return [
+                {
+                    "Code": "72030",
+                    "DisclosedDate": "2026-01-31",
+                    "CurPerEn": "2026-03-31",
+                    "CurPerType": "FY",
+                    "Sales": "48000000000000",
+                    "OP": "4800000000000",
+                    "NP": "4760000000000",
+                    "EPS": "359.56",
+                    "TA": "93600000000000",
+                    "Eq": "35900000000000",
+                    "DivAnn": "75.0",
+                }
+            ]
         return [
             {
                 "DisclosedDate": "2026-01-31",
@@ -141,6 +182,37 @@ class JQuantsSyncTests(unittest.TestCase):
         row = self.conn.execute("SELECT * FROM prices WHERE company_id = ?", (company_id,)).fetchone()
         self.assertEqual(row["trade_date"], "2026-01-05")
         self.assertEqual(row["adjusted_close"], 2550)
+
+    def test_sync_prices_by_date_imports_all_codes_from_one_request(self):
+        count = sync_jquants_prices_by_date(self.conn, FakeJQuantsClient(), "2026-01-05")
+        self.assertEqual(count, 2)
+        rows = self.conn.execute(
+            """
+            SELECT c.security_code, p.close
+            FROM prices p
+            JOIN company_master c ON c.id = p.company_id
+            ORDER BY c.security_code
+            """
+        ).fetchall()
+        self.assertEqual([(row["security_code"], row["close"]) for row in rows], [("7203", 2550.0), ("9432", 151.0)])
+
+    def test_sync_financials_by_date_imports_all_disclosures(self):
+        financials, dividends = sync_jquants_financials_by_date(
+            self.conn,
+            FakeJQuantsClient(),
+            "2026-01-31",
+            include_dividends=True,
+        )
+        self.assertEqual(financials, 1)
+        self.assertEqual(dividends, 1)
+        row = self.conn.execute(
+            """
+            SELECT c.security_code, f.revenue
+            FROM financial_facts f
+            JOIN company_master c ON c.id = f.company_id
+            """
+        ).fetchone()
+        self.assertEqual(row["security_code"], "7203")
 
     def test_earnings_events_are_filtered_by_code(self):
         ensure_company_for_code(self.conn, "7203")
