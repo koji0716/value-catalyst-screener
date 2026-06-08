@@ -379,6 +379,7 @@ def screen_companies(
     db_path=None,
     save=True,
     replace_filters=False,
+    read_only=False,
 ):
     presets = load_presets()
     if preset_name not in presets:
@@ -389,7 +390,10 @@ def screen_companies(
         filters.update({k: v for k, v in overrides.items() if v is not None})
     preset["filters"] = filters
 
-    conn = get_connection(db_path)
+    if read_only and save:
+        raise ValueError("Read-only screening cannot save results.")
+
+    conn = get_connection(db_path, read_only=read_only)
     try:
         query = "SELECT * FROM company_master WHERE is_active = 1"
         params = []
@@ -462,10 +466,10 @@ def find_company_by_ticker(conn, ticker):
     ).fetchone()
 
 
-def explain_ticker(ticker, preset_name="balanced", db_path=None):
+def explain_ticker(ticker, preset_name="balanced", db_path=None, read_only=False):
     presets = load_presets()
     preset = presets.get(preset_name, presets["balanced"])
-    conn = get_connection(db_path)
+    conn = get_connection(db_path, read_only=read_only)
     try:
         company = find_company_by_ticker(conn, ticker)
         if not company:

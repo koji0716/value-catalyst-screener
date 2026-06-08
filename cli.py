@@ -5,17 +5,15 @@ import shutil
 import subprocess
 import sys
 
-from src.analysis.backtest import run_simple_backtest
 from src.analysis.scoring import explain_ticker, screen_companies
 from src.db.migrations import init_db
 from src.db.session import get_connection
 from src.ingestion.coverage import data_coverage_rows
-from src.ingestion.refresh import DEFAULT_JP_SECTIONS, DEFAULT_US_EXCHANGES, refresh_until_current
-from src.ingestion.sync_all import sync_edgar_bulk_source, sync_jp_bulk_source, sync_market
-from src.nlp.report_generator import export_results
-from src.providers.edgar_client import EdgarError
-from src.providers.jquants_client import JQuantsError
 from src.utils.file_utils import DISCLAIMER, ensure_runtime_dirs, load_presets
+
+
+DEFAULT_JP_SECTIONS = "Prime,Standard,Growth"
+DEFAULT_US_EXCHANGES = "Nasdaq,NYSE"
 
 
 def format_number(value):
@@ -52,6 +50,8 @@ def add_common_screen_args(parser):
 
 
 def command_init(args):
+    from src.ingestion.sync_all import sync_market
+
     ensure_runtime_dirs()
     init_db()
     result = sync_market(market="all", use_sample=True, reset_sample=args.reset_sample)
@@ -61,6 +61,8 @@ def command_init(args):
 
 
 def command_sync(args):
+    from src.ingestion.sync_all import sync_market
+
     init_db()
     result = sync_market(
         market=args.market,
@@ -81,6 +83,9 @@ def command_sync(args):
 
 
 def command_bulk_sync_us(args):
+    from src.ingestion.sync_all import sync_edgar_bulk_source
+    from src.providers.edgar_client import EdgarError
+
     init_db()
     try:
         result = sync_edgar_bulk_source(
@@ -103,6 +108,9 @@ def command_bulk_sync_us(args):
 
 
 def command_bulk_sync_jp(args):
+    from src.ingestion.sync_all import sync_jp_bulk_source
+    from src.providers.jquants_client import JQuantsError
+
     init_db()
     try:
         result = sync_jp_bulk_source(
@@ -166,6 +174,8 @@ def command_explain(args):
 
 
 def command_report(args):
+    from src.nlp.report_generator import export_results
+
     results, _ = screen_companies(preset_name=args.preset, market=args.market, limit=args.limit, save=True)
     path = export_results(results, preset=args.preset, output_format=args.format)
     print("Report written: %s" % path)
@@ -173,6 +183,8 @@ def command_report(args):
 
 
 def command_backtest(args):
+    from src.analysis.backtest import run_simple_backtest
+
     result = run_simple_backtest(
         market=args.market,
         preset=args.preset,
@@ -245,6 +257,8 @@ def command_coverage(args):
 
 
 def command_refresh(args):
+    from src.ingestion.refresh import refresh_until_current
+
     init_db()
     result = refresh_until_current(
         market=args.market,
@@ -287,6 +301,28 @@ def command_app(args):
         print("After installing, run: python cli.py app")
         return 1
     return subprocess.call([streamlit, "run", "src/ui/streamlit_app.py"])
+
+
+def command_mcp(args):
+    try:
+        from src.mcp_server.server import run_server
+    except (ImportError, RuntimeError) as exc:
+        print(str(exc), file=sys.stderr)
+        print(
+            'MCP requires Python 3.10+. Install it with: python -m pip install "mcp[cli]>=1.0,<2.0"',
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        return run_server(
+            db_path=args.db_path,
+            transport=args.transport,
+            host=args.host,
+            port=args.port,
+        )
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 def find_company(conn, ticker):
@@ -359,6 +395,13 @@ def build_parser():
 
     app = sub.add_parser("app")
     app.set_defaults(func=command_app)
+
+    mcp = sub.add_parser("mcp")
+    mcp.add_argument("--db-path", help="SQLite path. Defaults to DB_PATH or data/value_screener.sqlite.")
+    mcp.add_argument("--transport", default="stdio", choices=["stdio", "streamable-http"])
+    mcp.add_argument("--host", default="127.0.0.1")
+    mcp.add_argument("--port", type=int, default=8000)
+    mcp.set_defaults(func=command_mcp)
 
     sync = sub.add_parser("sync")
     sync.add_argument("--market", default="jp", choices=["jp", "us", "all"])

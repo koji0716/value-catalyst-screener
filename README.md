@@ -25,6 +25,7 @@ PowerShell例:
 ```bash
 python cli.py init
 python cli.py app
+python cli.py mcp
 python cli.py sync --market jp
 python cli.py sync --market jp --source jquants --codes 7203,9432 --from 2025-01-01
 python cli.py sync --market jp --source jquants --mode manual --codes 7203 --from 2025-01-01
@@ -45,6 +46,48 @@ python cli.py backtest --market jp --preset balanced --from 2020-01-01 --to 2025
 python cli.py watchlist add --ticker 7203
 python cli.py watchlist show
 ```
+
+## MCPサーバ
+
+既存のSQLite DBと分析ロジックを、読み取り専用のMCPサーバとして利用できます。MCP SDKの要件によりPython 3.10以上が必要です。
+
+```bash
+python -m pip install -r requirements.txt
+
+# MCPクライアントから起動する通常構成（stdio）
+python cli.py mcp
+
+# 必要な場合だけローカルHTTPで起動
+python cli.py mcp --transport streamable-http --host 127.0.0.1 --port 8000
+```
+
+Streamable HTTPの接続先は `http://127.0.0.1:8000/mcp` です。既定の `stdio` はポートを開きません。
+
+MCPクライアント設定例:
+
+```json
+{
+  "mcpServers": {
+    "value-catalyst-screener": {
+      "command": "C:\\path\\to\\python.exe",
+      "args": [
+        "C:\\path\\to\\value-catalyst-screener\\cli.py",
+        "mcp"
+      ],
+      "cwd": "C:\\path\\to\\value-catalyst-screener"
+    }
+  }
+}
+```
+
+公開する主な機能:
+
+- DB概要・データカバレッジ・テーブル定義
+- 銘柄検索、既存ロジックによる銘柄分析とスクリーニング
+- 株価、財務、イベント、開示、コーポレートアクションの取得
+- `SELECT` / `WITH` に限定した読み取り専用SQL
+
+MCP経由では同期、ウォッチリスト更新、スクリーニング結果保存などの更新処理を実行しません。SQLツールもSQLiteのread-only接続、authorizer、最大返却件数、実行時間制限を適用します。
 
 ## MVPの範囲
 
