@@ -17,7 +17,7 @@ from src.ingestion.jquants_sync import (
 )
 from src.ingestion.jp_bulk_sync import filtered_jp_records, record_code, sync_jp_bulk_market
 from src.ingestion.sample_data import seed_sample_data
-from src.ingestion.sync_state import begin_sync_job, finish_sync_job, upsert_sync_state
+from src.ingestion.sync_state import acquire_sync_lock, begin_sync_job, finish_sync_job, release_sync_lock, upsert_sync_state
 from src.providers.jquants_client import JQuantsClient, JQuantsError
 from src.providers.edgar_client import EdgarClient, EdgarError
 from src.utils.file_utils import load_settings
@@ -56,9 +56,11 @@ def sync_market(
         "include_events": include_events,
     }
     job_id = None
+    lock_owner = None
     if record_state:
         conn = get_connection()
         try:
+            lock_owner = acquire_sync_lock(conn, "sync:writer")
             job_id = begin_sync_job(conn, "market_sync", market, source, mode, params)
             upsert_sync_state(conn, market, source, mode, "running", params, message="同期中")
         finally:
@@ -99,6 +101,13 @@ def sync_market(
             finally:
                 conn.close()
         raise
+    finally:
+        if lock_owner:
+            conn = get_connection()
+            try:
+                release_sync_lock(conn, "sync:writer", lock_owner)
+            finally:
+                conn.close()
 
 
 def _sync_market_impl(
@@ -365,9 +374,11 @@ def sync_edgar_bulk_source(
         "resume": resume,
     }
     job_id = None
+    lock_owner = None
     if record_state:
         state_conn = get_connection()
         try:
+            lock_owner = acquire_sync_lock(state_conn, "sync:writer")
             job_id = begin_sync_job(state_conn, "bulk_sync", "us", "edgar", "bulk", params)
             upsert_sync_state(state_conn, "us", "edgar", "bulk", "running", params, message="米国株一括同期中")
         finally:
@@ -416,6 +427,12 @@ def sync_edgar_bulk_source(
     finally:
         if conn:
             conn.close()
+        if lock_owner:
+            state_conn = get_connection()
+            try:
+                release_sync_lock(state_conn, "sync:writer", lock_owner)
+            finally:
+                state_conn.close()
 
 
 def sync_jp_bulk_source(
@@ -447,9 +464,11 @@ def sync_jp_bulk_source(
         "resume": resume,
     }
     job_id = None
+    lock_owner = None
     if record_state:
         state_conn = get_connection()
         try:
+            lock_owner = acquire_sync_lock(state_conn, "sync:writer")
             job_id = begin_sync_job(state_conn, "bulk_sync", "jp", "jquants", "bulk", params)
             upsert_sync_state(state_conn, "jp", "jquants", "bulk", "running", params, message="日本株一括同期中")
         finally:
@@ -499,6 +518,12 @@ def sync_jp_bulk_source(
     finally:
         if conn:
             conn.close()
+        if lock_owner:
+            state_conn = get_connection()
+            try:
+                release_sync_lock(state_conn, "sync:writer", lock_owner)
+            finally:
+                state_conn.close()
 
 
 def sync_jp_screening_source(
@@ -523,9 +548,11 @@ def sync_jp_screening_source(
         "include_dividends": include_dividends,
     }
     job_id = None
+    lock_owner = None
     if record_state:
         state_conn = get_connection()
         try:
+            lock_owner = acquire_sync_lock(state_conn, "sync:writer")
             job_id = begin_sync_job(state_conn, "screening_sync", "jp", "jquants", "screening", params)
             upsert_sync_state(state_conn, "jp", "jquants", "screening", "running", params, message="日本株スクリーニング同期中")
         finally:
@@ -661,6 +688,12 @@ def sync_jp_screening_source(
     finally:
         if conn:
             conn.close()
+        if lock_owner:
+            state_conn = get_connection()
+            try:
+                release_sync_lock(state_conn, "sync:writer", lock_owner)
+            finally:
+                state_conn.close()
 
 
 def sync_jquants_market(

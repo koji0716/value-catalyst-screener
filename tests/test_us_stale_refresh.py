@@ -107,10 +107,36 @@ class UsStaleRefreshTests(unittest.TestCase):
                 WHERE market = 'us' AND source = 'edgar' AND mode = 'stale_prices'
                 """
             ).fetchone()
+            locks = conn.execute("SELECT COUNT(*) FROM sync_locks").fetchone()[0]
         finally:
             conn.close()
         self.assertEqual(state["status"], "success")
         self.assertIn("完了", state["message"])
+        self.assertEqual(locks, 0)
+
+    def test_refresh_rejects_existing_writer_lock(self):
+        conn = self.connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO sync_locks (lock_key, owner, expires_at)
+                VALUES ('sync:writer', 'test-owner', datetime(CURRENT_TIMESTAMP, '+5 minutes'))
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with self.assertRaisesRegex(RuntimeError, "別のデータ取得"):
+            refresh_stale_us_prices(
+                stale_before="2026-06-10",
+                end_date="2026-06-18",
+                batch_limit=10,
+                max_batches=1,
+                db_path=self.db_path,
+                sync_func=self.fake_sync,
+                sleep_func=lambda _: None,
+            )
 
 
 if __name__ == "__main__":

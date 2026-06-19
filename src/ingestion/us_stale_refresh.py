@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 from src.db.session import get_connection
 from src.ingestion.edgar_sync import sync_edgar_market
-from src.ingestion.sync_state import begin_sync_job, finish_sync_job, upsert_sync_state
+from src.ingestion.sync_state import acquire_sync_lock, begin_sync_job, finish_sync_job, release_sync_lock, upsert_sync_state
 from src.providers.edgar_client import EdgarClient
 
 
@@ -160,7 +160,9 @@ def refresh_stale_us_prices(
     }
     conn = get_connection(db_path)
     job_id = None
+    lock_owner = None
     try:
+        lock_owner = acquire_sync_lock(conn, "sync:writer")
         if record_state:
             job_id = begin_sync_job(conn, "stale_price_refresh", "us", "edgar", "stale_prices", params)
             upsert_sync_state(conn, "us", "edgar", "stale_prices", "running", params, message="古い米国株価を再取得中")
@@ -239,4 +241,5 @@ def refresh_stale_us_prices(
             upsert_sync_state(conn, "us", "edgar", "stale_prices", "failed", params, error_result, str(exc))
         raise
     finally:
+        release_sync_lock(conn, "sync:writer", lock_owner)
         conn.close()

@@ -201,6 +201,14 @@ SCHEMA = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS sync_locks (
+      lock_key TEXT PRIMARY KEY,
+      owner TEXT NOT NULL,
+      acquired_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      expires_at DATETIME NOT NULL
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS unavailable_data (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       market TEXT NOT NULL,
@@ -226,5 +234,6 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_screening_run ON screening_results(run_id)",
     "CREATE INDEX IF NOT EXISTS idx_sync_jobs_created ON sync_jobs(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_sync_state_source ON sync_state(source, market)",
+    "CREATE INDEX IF NOT EXISTS idx_sync_locks_expires ON sync_locks(expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_unavailable_lookup ON unavailable_data(market, source, data_type, identifier)",
 ]

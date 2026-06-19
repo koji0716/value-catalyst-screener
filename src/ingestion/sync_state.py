@@ -1,5 +1,72 @@
 import json
+import os
+import sqlite3
+import socket
 
+
+SYNC_LOCKS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS sync_locks (
+  lock_key TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  acquired_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL
+)
+"""
+
+
+def sync_lock_owner():
+    return "%s:%s" % (socket.gethostname(), os.getpid())
+
+
+def ensure_sync_locks_table(conn):
+    conn.execute(SYNC_LOCKS_SCHEMA)
+
+
+def acquire_sync_lock(conn, lock_key, owner=None, ttl_minutes=240):
+    owner = owner or sync_lock_owner()
+    ensure_sync_locks_table(conn)
+    conn.execute("DELETE FROM sync_locks WHERE expires_at <= CURRENT_TIMESTAMP")
+    try:
+        conn.execute(
+            """
+            INSERT INTO sync_locks (lock_key, owner, expires_at)
+            VALUES (?, ?, datetime(CURRENT_TIMESTAMP, ?))
+            """,
+            (lock_key, owner, "+%d minutes" % int(ttl_minutes)),
+        )
+        conn.commit()
+        return owner
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        existing = conn.execute(
+            """
+            SELECT owner, acquired_at, expires_at
+            FROM sync_locks
+            WHERE lock_key = ?
+            """,
+            (lock_key,),
+        ).fetchone()
+        if existing:
+            raise RuntimeError(
+                "別のデータ取得が実行中です。完了後に再実行してください。"
+                " lock=%s owner=%s acquired_at=%s expires_at=%s"
+                % (lock_key, existing["owner"], existing["acquired_at"], existing["expires_at"])
+            )
+        raise
+
+
+def release_sync_lock(conn, lock_key, owner):
+    if not owner:
+        return
+    ensure_sync_locks_table(conn)
+    conn.execute(
+        """
+        DELETE FROM sync_locks
+        WHERE lock_key = ? AND owner = ?
+        """,
+        (lock_key, owner),
+    )
+    conn.commit()
 
 def make_state_key(market, source, mode):
     return "%s:%s:%s" % (market or "all", source or "auto", mode or "manual")
