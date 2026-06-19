@@ -541,7 +541,7 @@ def run_stale_us_price_update(stale_before, end_date, batch_limit, max_batches, 
         progress_callback(1, 1, "古い米国株価の再取得を処理しました。")
     status = "success" if result.get("stopped_reason") == "complete" else "warning"
     return {
-        "overall": status,
+        "status": status,
         "message": "古い米国株価の再取得を処理しました。",
         "runs": [{"market": "us", "status": status, "result": result}],
     }
@@ -663,12 +663,14 @@ def run_deep_fetch(market, ticker, start_date, progress_callback=None):
 def render_status_message(result):
     if not result:
         return
-    if result["status"] == "success":
-        st.success(result["message"])
-    elif result["status"] == "warning":
-        st.warning(result["message"])
+    status = result.get("status") or result.get("overall")
+    message = result.get("message") or "処理結果を表示できません。"
+    if status == "success":
+        st.success(message)
+    elif status == "warning":
+        st.warning(message)
     else:
-        st.error(result["message"])
+        st.error(message)
 
 
 def render_run_details(result):
