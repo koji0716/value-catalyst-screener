@@ -282,6 +282,27 @@ def command_refresh(args):
     print(DISCLAIMER)
 
 
+def command_refresh_stale_us(args):
+    from src.ingestion.us_stale_refresh import refresh_stale_us_prices
+
+    init_db()
+    result = refresh_stale_us_prices(
+        start_date=args.start_date,
+        end_date=args.end_date,
+        stale_before=args.stale_before,
+        batch_limit=args.limit,
+        max_batches=args.max_batches,
+        sleep_sec=args.sleep_sec,
+        include_no_price=not args.exclude_no_price,
+        include_financials=args.with_financials,
+        include_filings=args.with_filings,
+        include_dividends=args.with_dividends,
+        user_agent=args.user_agent,
+    )
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(DISCLAIMER)
+
+
 def command_app(args):
     if importlib.util.find_spec("streamlit"):
         return subprocess.call(
@@ -494,6 +515,20 @@ def build_parser():
     refresh.add_argument("--no-filings", action="store_true", help="Skip SEC filing synchronization.")
     refresh.add_argument("--no-resume", action="store_true", help="Reprocess records even when requested data already exists.")
     refresh.set_defaults(func=command_refresh)
+
+    stale_us = sub.add_parser("refresh-stale-us")
+    stale_us.add_argument("--from", dest="start_date", help="Override price fetch start date. Defaults to the oldest selected latest price date.")
+    stale_us.add_argument("--to", dest="end_date")
+    stale_us.add_argument("--stale-before", help="Refresh companies whose latest US price date is older than this YYYY-MM-DD date. Defaults to today minus 10 days.")
+    stale_us.add_argument("--limit", type=int, default=50, help="Records per stale refresh batch.")
+    stale_us.add_argument("--max-batches", type=int, default=1, help="Maximum stale batches to run before yielding.")
+    stale_us.add_argument("--sleep-sec", type=float, default=0, help="Sleep seconds between batches.")
+    stale_us.add_argument("--exclude-no-price", action="store_true", help="Do not include US companies with no price rows.")
+    stale_us.add_argument("--with-financials", action="store_true", help="Also refresh SEC companyfacts for selected stale tickers.")
+    stale_us.add_argument("--with-filings", action="store_true", help="Also refresh SEC submissions/filing lists for selected stale tickers.")
+    stale_us.add_argument("--with-dividends", action="store_true", help="Also refresh yfinance dividend actions for selected stale tickers.")
+    stale_us.add_argument("--user-agent", help="Temporary SEC User-Agent.")
+    stale_us.set_defaults(func=command_refresh_stale_us)
 
     watchlist = sub.add_parser("watchlist")
     watch_sub = watchlist.add_subparsers(dest="watch_action", required=True)

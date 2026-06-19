@@ -24,6 +24,7 @@ from src.ingestion.coverage import data_coverage_rows
 from src.ingestion.refresh import refresh_until_current
 from src.ingestion.sync_all import sync_jp_screening_source, sync_market
 from src.ingestion.sync_state import latest_sync_jobs, latest_sync_states
+from src.ingestion.us_stale_refresh import refresh_stale_us_prices
 from src.nlp.report_generator import export_results
 from src.ui.components import disclaimer, format_money, format_pct, format_ratio
 from src.ui.glossary import GLOSSARY_ORDER, term_help, term_rows
@@ -44,6 +45,10 @@ RUN_RESULT_KEYS = [
     "from",
     "to",
     "batches_run",
+    "selected_records",
+    "stale_before",
+    "remaining_stale_before",
+    "remaining_stale_after",
     "inserted_companies",
     "updated_companies",
     "inserted_prices",
@@ -518,6 +523,30 @@ def run_update_step(market, start_date, end_date, batch_limit, max_batches, slee
     return status, result
 
 
+def run_stale_us_price_update(stale_before, end_date, batch_limit, max_batches, sleep_sec, progress_callback=None):
+    if progress_callback:
+        progress_callback(0, 1, "古い米国株価を再取得しています...")
+    result = refresh_stale_us_prices(
+        end_date=end_date,
+        stale_before=stale_before,
+        batch_limit=batch_limit,
+        max_batches=max_batches,
+        sleep_sec=sleep_sec,
+        include_no_price=True,
+        include_financials=False,
+        include_filings=False,
+        include_dividends=False,
+    )
+    if progress_callback:
+        progress_callback(1, 1, "古い米国株価の再取得を処理しました。")
+    status = "success" if result.get("stopped_reason") == "complete" else "warning"
+    return {
+        "overall": status,
+        "message": "古い米国株価の再取得を処理しました。",
+        "runs": [{"market": "us", "status": status, "result": result}],
+    }
+
+
 def run_market_data_update(target, start_date, end_date, batch_limit, max_batches, sleep_sec, progress_callback=None):
     markets = ["jp", "us"] if target == "all" else [target]
     runs = []
@@ -825,18 +854,29 @@ def render_fetch_panel():
         end = c2.date_input("取得終了日", value=date.today(), key="fetch_end") if end_enabled else None
         batch_limit = c3.number_input("米国株バッチ件数", min_value=1, max_value=500, value=50, step=10)
         max_batches = c4.number_input("米国株最大バッチ数", min_value=1, max_value=500, value=30, step=5)
+        s1, s2 = st.columns([1, 3])
+        stale_before = s1.date_input(
+            "米国株の古い判定日",
+            value=date.today() - timedelta(days=10),
+            key="fetch_us_stale_before",
+            help="この日付より前で株価が止まっている米国銘柄を再取得します。",
+        )
+        s2.caption("古い米国株価の再取得は、各銘柄の最終株価日から取り直します。財務・提出書類の大量再取得は行いません。")
         sleep_sec = st.number_input("米国株バッチ間隔(秒)", min_value=0.0, max_value=120.0, value=0.0, step=1.0)
 
-    b1, b2, b3 = st.columns(3)
+    b1, b2, b3, b4 = st.columns(4)
     target = None
+    stale_us_prices = False
     if b1.button("日本株を日付単位で取得", type="primary", width="stretch"):
         target = "jp"
     if b2.button("米国株をまとめて取得", width="stretch"):
         target = "us"
     if b3.button("日米まとめて取得", width="stretch"):
         target = "all"
+    if b4.button("古い米国株価を再取得", width="stretch"):
+        stale_us_prices = True
 
-    if target:
+    if target or stale_us_prices:
         progress_bar = st.progress(0.0)
         status_text = st.empty()
 
@@ -844,15 +884,25 @@ def render_fetch_panel():
             progress_bar.progress(done / total if total else 0.0)
             status_text.info(message)
 
-        result = run_market_data_update(
-            target,
-            start.isoformat(),
-            end.isoformat() if end else None,
-            int(batch_limit),
-            int(max_batches),
-            float(sleep_sec),
-            progress_callback=update_progress,
-        )
+        if stale_us_prices:
+            result = run_stale_us_price_update(
+                stale_before.isoformat(),
+                end.isoformat() if end else None,
+                int(batch_limit),
+                int(max_batches),
+                float(sleep_sec),
+                progress_callback=update_progress,
+            )
+        else:
+            result = run_market_data_update(
+                target,
+                start.isoformat(),
+                end.isoformat() if end else None,
+                int(batch_limit),
+                int(max_batches),
+                float(sleep_sec),
+                progress_callback=update_progress,
+            )
         st.session_state.fetch_result = result
         progress_bar.progress(1.0)
         status_text.empty()

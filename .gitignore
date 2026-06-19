@@ -13,6 +13,7 @@ env/
 
 data/*.sqlite
 data/*.sqlite-*
+data/*.log
 data/raw/**
 data/exports/**
 !data/raw/.gitkeep
@@ -24,4 +25,3 @@ data/exports/**
 
 .DS_Store
 Thumbs.db
-
