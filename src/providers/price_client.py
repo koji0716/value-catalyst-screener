@@ -1,6 +1,6 @@
 import os
 
-from src.utils.file_utils import load_env
+from src.utils.file_utils import PROJECT_ROOT, load_env
 
 
 class PriceClient:
@@ -8,12 +8,19 @@ class PriceClient:
         load_env()
         self.provider = provider or os.environ.get("PRICE_PROVIDER", "yfinance")
 
+    def _configure_yfinance_cache(self, yf):
+        cache_dir = PROJECT_ROOT / "data" / "raw" / "prices" / "yfinance-cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        if hasattr(yf, "set_tz_cache_location"):
+            yf.set_tz_cache_location(str(cache_dir))
+
     def fetch_ohlc(self, ticker, start_date=None, end_date=None):
         if self.provider == "yfinance":
             try:
                 import yfinance as yf  # type: ignore
             except Exception:
                 return []
+            self._configure_yfinance_cache(yf)
             data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
             if data is None or data.empty:
                 return []
@@ -30,6 +37,7 @@ class PriceClient:
             import yfinance as yf  # type: ignore
         except Exception:
             return {symbol: [] for symbol in symbols}
+        self._configure_yfinance_cache(yf)
 
         data = yf.download(
             symbols if len(symbols) > 1 else symbols[0],
@@ -84,6 +92,7 @@ class PriceClient:
                 import yfinance as yf  # type: ignore
             except Exception:
                 return []
+            self._configure_yfinance_cache(yf)
             series = yf.Ticker(ticker).dividends
             if series is None or series.empty:
                 return []
@@ -96,6 +105,7 @@ class PriceClient:
                 import yfinance as yf  # type: ignore
             except Exception:
                 return []
+            self._configure_yfinance_cache(yf)
             series = yf.Ticker(ticker).splits
             if series is None or series.empty:
                 return []

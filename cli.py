@@ -298,6 +298,8 @@ def command_refresh_stale_us(args):
         include_filings=args.with_filings,
         include_dividends=args.with_dividends,
         user_agent=args.user_agent,
+        exclude_recent_unavailable=not args.include_recent_unavailable,
+        unavailable_retry_days=args.retry_unavailable_days,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     print(DISCLAIMER)
@@ -528,6 +530,8 @@ def build_parser():
     stale_us.add_argument("--with-filings", action="store_true", help="Also refresh SEC submissions/filing lists for selected stale tickers.")
     stale_us.add_argument("--with-dividends", action="store_true", help="Also refresh yfinance dividend actions for selected stale tickers.")
     stale_us.add_argument("--user-agent", help="Temporary SEC User-Agent.")
+    stale_us.add_argument("--include-recent-unavailable", action="store_true", help="Retry tickers recently marked as having no yfinance prices.")
+    stale_us.add_argument("--retry-unavailable-days", type=int, default=30, help="Days to defer tickers after yfinance returns no newer prices.")
     stale_us.set_defaults(func=command_refresh_stale_us)
 
     watchlist = sub.add_parser("watchlist")

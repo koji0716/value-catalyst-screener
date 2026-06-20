@@ -59,6 +59,7 @@ RUN_RESULT_KEYS = [
     "inserted_events",
     "inserted_text_blocks",
     "inserted_risk_events",
+    "marked_unavailable_prices",
     "processed_price_dates",
     "processed_financial_dates",
     "first_price_date",
@@ -472,34 +473,67 @@ def market_label(market):
     return {"jp": "日本株", "us": "米国株", "all": "日米"}.get(market, market)
 
 
-def run_update_step(market, start_date, end_date, batch_limit, max_batches, sleep_sec, progress_callback=None):
-    if market == "jp":
-        def forward_jp_progress(progress):
-            if not progress_callback:
-                return
-            done = int(progress.get("processed_dates") or 0)
-            total = int(progress.get("total_dates") or 0)
-            message = (
-                "%s: %s/%s日 (%s) / 今回取得 %s件 / 累計 %s件"
-                % (
-                    progress.get("message") or "日本株データ取得中",
-                    done,
-                    total,
-                    progress.get("current_date") or "-",
-                    progress.get("inserted") or 0,
-                    progress.get("inserted_total") or 0,
-                )
+def run_jp_screening_update(
+    start_date,
+    end_date,
+    include_prices=True,
+    include_financials=True,
+    include_dividends=False,
+    include_events=False,
+    progress_callback=None,
+):
+    def forward_jp_progress(progress):
+        if not progress_callback:
+            return
+        done = int(progress.get("processed_dates") or 0)
+        total = int(progress.get("total_dates") or 0)
+        message = (
+            "%s: %s/%s日 (%s) / 今回取得 %s件 / 累計 %s件"
+            % (
+                progress.get("message") or "日本株データ取得中",
+                done,
+                total,
+                progress.get("current_date") or "-",
+                progress.get("inserted") or 0,
+                progress.get("inserted_total") or 0,
             )
-            progress_callback(done, total, message)
+        )
+        progress_callback(done, total, message)
 
-        result = sync_jp_screening_source(
+    return sync_jp_screening_source(
+        start_date=start_date,
+        end_date=end_date,
+        sections="all",
+        include_prices=include_prices,
+        include_financials=include_financials,
+        include_dividends=include_dividends,
+        progress_callback=forward_jp_progress,
+    )
+
+
+def run_update_step(
+    market,
+    start_date,
+    end_date,
+    batch_limit,
+    max_batches,
+    sleep_sec,
+    progress_callback=None,
+    include_prices=True,
+    include_financials=True,
+    include_filings=False,
+    include_dividends=False,
+    include_events=False,
+):
+    if market == "jp":
+        result = run_jp_screening_update(
             start_date=start_date,
             end_date=end_date,
-            sections="all",
-            include_prices=True,
-            include_financials=True,
-            include_dividends=False,
-            progress_callback=forward_jp_progress,
+            include_prices=include_prices,
+            include_financials=include_financials,
+            include_dividends=include_dividends,
+            include_events=include_events,
+            progress_callback=progress_callback,
         )
         return "success", result
 
@@ -511,11 +545,11 @@ def run_update_step(market, start_date, end_date, batch_limit, max_batches, slee
         max_batches=max_batches,
         sleep_sec=sleep_sec,
         us_exchanges="all",
-        include_prices=True,
-        include_financials=True,
-        include_dividends=False,
-        include_events=False,
-        include_filings=False,
+        include_prices=include_prices,
+        include_financials=include_financials,
+        include_dividends=include_dividends,
+        include_events=include_events,
+        include_filings=include_filings,
         resume=True,
         ensure_master=True,
     )
@@ -547,7 +581,98 @@ def run_stale_us_price_update(stale_before, end_date, batch_limit, max_batches, 
     }
 
 
-def run_market_data_update(target, start_date, end_date, batch_limit, max_batches, sleep_sec, progress_callback=None):
+def run_price_only_update(target, stale_before, start_date, end_date, batch_limit, max_batches, sleep_sec, progress_callback=None):
+    markets = ["jp", "us"] if target == "all" else [target]
+    runs = []
+    for index, market in enumerate(markets):
+        if progress_callback:
+            progress_callback(index, len(markets), "%s株価を取得しています..." % market_label(market))
+        try:
+            if market == "us":
+                result = refresh_stale_us_prices(
+                    end_date=end_date,
+                    stale_before=stale_before,
+                    batch_limit=batch_limit,
+                    max_batches=max_batches,
+                    sleep_sec=sleep_sec,
+                    include_no_price=True,
+                    include_financials=False,
+                    include_filings=False,
+                    include_dividends=False,
+                )
+                status = "success" if result.get("stopped_reason") == "complete" else "warning"
+            else:
+                result = run_jp_screening_update(
+                    start_date=start_date,
+                    end_date=end_date,
+                    include_prices=True,
+                    include_financials=False,
+                    include_dividends=False,
+                    include_events=False,
+                    progress_callback=progress_callback,
+                )
+                status = "warning" if result.get("warnings") else "success"
+        except Exception as exc:
+            status = "failed"
+            result = {"market": market, "error": str(exc)}
+        runs.append({"market": market, "status": status, "result": result})
+        if progress_callback:
+            progress_callback(index + 1, len(markets), "%s株価取得を処理しました。" % market_label(market))
+    return build_fetch_result(target, "株価だけの取得を処理しました。", runs)
+
+
+def run_non_price_update(target, start_date, end_date, batch_limit, max_batches, sleep_sec, progress_callback=None):
+    return run_market_data_update(
+        target,
+        start_date,
+        end_date,
+        batch_limit,
+        max_batches,
+        sleep_sec,
+        progress_callback=progress_callback,
+        include_prices=False,
+        include_financials=True,
+        include_filings=True,
+        include_dividends=True,
+        include_events=True,
+        message_success="株価以外のデータ取得が完了しました。",
+        message_warning="株価以外のデータ取得が途中停止または一部失敗しました。",
+        message_failed="株価以外のデータ取得に失敗しました。",
+    )
+
+
+def build_fetch_result(target, default_message, runs, messages=None):
+    statuses = [run["status"] for run in runs]
+    messages = messages or {}
+    if all(status == "success" for status in statuses):
+        overall = "success"
+        message = messages.get("success") or default_message
+    elif all(status == "failed" for status in statuses):
+        overall = "failed"
+        message = messages.get("failed") or "データ取得に失敗しました。"
+    else:
+        overall = "warning"
+        message = messages.get("warning") or "一部のデータ取得が途中停止または失敗しました。"
+    return {"market": target, "status": overall, "message": message, "runs": runs}
+
+
+def run_market_data_update(
+    target,
+    start_date,
+    end_date,
+    batch_limit,
+    max_batches,
+    sleep_sec,
+    progress_callback=None,
+    include_prices=True,
+    include_financials=True,
+    include_filings=False,
+    include_dividends=False,
+    include_events=False,
+    message_success="データ取得が完了しました。",
+    message_warning="一部のデータ取得が途中停止または失敗しました。",
+    message_failed="データ取得に失敗しました。",
+):
     markets = ["jp", "us"] if target == "all" else [target]
     runs = []
     for index, market in enumerate(markets):
@@ -562,6 +687,11 @@ def run_market_data_update(target, start_date, end_date, batch_limit, max_batche
                 max_batches,
                 sleep_sec,
                 progress_callback=progress_callback,
+                include_prices=include_prices,
+                include_financials=include_financials,
+                include_filings=include_filings,
+                include_dividends=include_dividends,
+                include_events=include_events,
             )
         except Exception as exc:
             status = "failed"
@@ -570,17 +700,12 @@ def run_market_data_update(target, start_date, end_date, batch_limit, max_batche
         if progress_callback:
             progress_callback(index + 1, len(markets), "%sデータ取得を処理しました。" % market_label(market))
 
-    statuses = [run["status"] for run in runs]
-    if all(status == "success" for status in statuses):
-        overall = "success"
-        message = "データ取得が完了しました。"
-    elif all(status == "failed" for status in statuses):
-        overall = "failed"
-        message = "データ取得に失敗しました。"
-    else:
-        overall = "warning"
-        message = "一部のデータ取得が途中停止または失敗しました。"
-    return {"market": target, "status": overall, "message": message, "runs": runs}
+    return build_fetch_result(
+        target,
+        message_success,
+        runs,
+        {"success": message_success, "warning": message_warning, "failed": message_failed},
+    )
 
 
 def run_deep_fetch(market, ticker, start_date, progress_callback=None):
@@ -854,8 +979,16 @@ def render_fetch_panel():
         start = c1.date_input("取得開始日", value=date.today() - timedelta(days=DEFAULT_START_DAYS), key="fetch_start")
         end_enabled = c2.checkbox("終了日を指定", value=False, key="fetch_end_enabled")
         end = c2.date_input("取得終了日", value=date.today(), key="fetch_end") if end_enabled else None
-        batch_limit = c3.number_input("米国株バッチ件数", min_value=1, max_value=500, value=50, step=10)
-        max_batches = c4.number_input("米国株最大バッチ数", min_value=1, max_value=500, value=30, step=5)
+        batch_limit = c3.number_input("米国株バッチ件数", min_value=1, max_value=500, value=100, step=10)
+        max_batches = c4.number_input("最大バッチ数", min_value=1, max_value=2000, value=100, step=10)
+        target_label = st.radio(
+            "取得対象",
+            ["米国株", "日本株", "日米"],
+            horizontal=True,
+            key="fetch_target_market",
+        )
+        target_map = {"日本株": "jp", "米国株": "us", "日米": "all"}
+        target = target_map[target_label]
         s1, s2 = st.columns([1, 3])
         stale_before = s1.date_input(
             "米国株の古い判定日",
@@ -863,22 +996,17 @@ def render_fetch_panel():
             key="fetch_us_stale_before",
             help="この日付より前で株価が止まっている米国銘柄を再取得します。",
         )
-        s2.caption("古い米国株価の再取得は、各銘柄の最終株価日から取り直します。財務・提出書類の大量再取得は行いません。")
-        sleep_sec = st.number_input("米国株バッチ間隔(秒)", min_value=0.0, max_value=120.0, value=0.0, step=1.0)
+        s2.caption("株価は価格API、株価以外は各市場の開示・財務データを小分けで取得します。")
+        sleep_sec = st.number_input("バッチ間隔(秒)", min_value=0.0, max_value=120.0, value=1.0, step=1.0)
 
-    b1, b2, b3, b4 = st.columns(4)
-    target = None
-    stale_us_prices = False
-    if b1.button("日本株を日付単位で取得", type="primary", width="stretch"):
-        target = "jp"
-    if b2.button("米国株をまとめて取得", width="stretch"):
-        target = "us"
-    if b3.button("日米まとめて取得", width="stretch"):
-        target = "all"
-    if b4.button("古い米国株価を再取得", width="stretch"):
-        stale_us_prices = True
+    b1, b2 = st.columns(2)
+    fetch_mode = None
+    if b1.button("株価だけを継続取得", type="primary", width="stretch"):
+        fetch_mode = "prices"
+    if b2.button("株価以外を継続取得", width="stretch"):
+        fetch_mode = "non_prices"
 
-    if target or stale_us_prices:
+    if fetch_mode:
         progress_bar = st.progress(0.0)
         status_text = st.empty()
 
@@ -886,9 +1014,11 @@ def render_fetch_panel():
             progress_bar.progress(done / total if total else 0.0)
             status_text.info(message)
 
-        if stale_us_prices:
-            result = run_stale_us_price_update(
+        if fetch_mode == "prices":
+            result = run_price_only_update(
+                target,
                 stale_before.isoformat(),
+                start.isoformat(),
                 end.isoformat() if end else None,
                 int(batch_limit),
                 int(max_batches),
@@ -896,7 +1026,7 @@ def render_fetch_panel():
                 progress_callback=update_progress,
             )
         else:
-            result = run_market_data_update(
+            result = run_non_price_update(
                 target,
                 start.isoformat(),
                 end.isoformat() if end else None,
